@@ -38,10 +38,14 @@ const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 const BODY_LIMIT = 2 * 1024 * 1024;             // 2 MB
 const UPLOAD_LIMIT = 25 * 1024 * 1024;          // 25 MB per uploaded file
 const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
+const HISTORY_DIR = path.join(DATA_DIR, 'history');
 const UPLOAD_EXT_RE = 'png|jpe?g|gif|webp|pdf|docx?|pptx?|xlsx?|txt|csv|zip|odt|odp|ods';
 const UPLOAD_NAME_RE = new RegExp(`^[a-f0-9]{32}\\.(${UPLOAD_EXT_RE})$`);
 const SHARE_TOKEN_RE = /^[a-f0-9]{32}$/;
 const MAX_NOTES_PER_USER = 5000;
+const MAX_TRASH_PER_USER = 500;
+const MAX_HISTORY_PER_NOTE = 50;
+const HISTORY_FLOOR_MS = 60 * 1000;               // min spacing between "edit" entries
 const MAX_FOLDERS_PER_USER = 100;
 const MAX_USERS = 100;
 const LOGIN_MAX_FAILURES = 5;
@@ -79,7 +83,7 @@ class HttpError extends Error {
 
 /* -------------------------------------------------------------------- data */
 
-let db = { users: [], sessions: {}, settings: { registrationOpen: true }, notes: [], folders: [], uploads: {} };
+let db = { users: [], sessions: {}, settings: { registrationOpen: true, trashRetentionDays: 30 }, notes: [], folders: [], uploads: {} };
 
 function log(...args) {
   console.log(`[${new Date().toISOString()}]`, ...args);
@@ -93,6 +97,8 @@ const isUserShape = (u) =>
 const isNoteShape = (n) => n && typeof n === 'object' && typeof n.id === 'string';
 const isFolderShape = (f) =>
   f && typeof f === 'object' && typeof f.id === 'string' && typeof f.userId === 'string' && typeof f.name === 'string';
+
+const normTrashDays = (v) => (Number.isInteger(v) && v >= 1 && v <= 3650) ? v : 30;
 
 async function loadDb() {
   try {
@@ -120,7 +126,10 @@ async function loadDb() {
     db = {
       users,
       sessions: parsed.sessions && typeof parsed.sessions === 'object' ? parsed.sessions : {},
-      settings: { registrationOpen: !(parsed.settings && parsed.settings.registrationOpen === false) },
+      settings: {
+        registrationOpen: !(parsed.settings && parsed.settings.registrationOpen === false),
+        trashRetentionDays: normTrashDays(parsed.settings && parsed.settings.trashRetentionDays),
+      },
       notes,
       folders: Array.isArray(parsed.folders) ? parsed.folders.filter(isFolderShape) : [],
       uploads: parsed.uploads && typeof parsed.uploads === 'object' ? parsed.uploads : {},
@@ -145,6 +154,10 @@ async function loadDb() {
       if (n.folderId != null && !db.folders.some((f) => f.id === n.folderId && f.userId === n.userId)) {
         n.folderId = null;
       }
+      // Data-safety fields: rev is the concurrency token, deletedAt marks a
+      // trashed note. Notes written before they existed start at rev 1 / live.
+      n.rev = (Number.isInteger(n.rev) && n.rev >= 1) ? n.rev : 1;
+      n.deletedAt = (typeof n.deletedAt === 'number') ? n.deletedAt : null;
     }
   } catch (err) {
     if (err.code !== 'ENOENT') console.error(`Warning: could not parse ${DB_FILE} (${err.message}); starting with an empty store.`);
@@ -152,6 +165,8 @@ async function loadDb() {
 }
 
 // Coalesce rapid writes into a single atomic write (tmp file + rename).
+// A failed write is retried with a short backoff (Windows can refuse the
+// rename for a moment while a scanner holds the file) — never dropped.
 let saveQueued = false;
 let saveRunning = false;
 function saveDb() {
@@ -159,19 +174,121 @@ function saveDb() {
   if (saveRunning) return;
   saveRunning = true;
   (async () => {
+    let retries = 0;
     try {
       while (saveQueued) {
         saveQueued = false;
-        await fsp.mkdir(DATA_DIR, { recursive: true });
-        const tmp = DB_FILE + '.tmp';
-        await fsp.writeFile(tmp, JSON.stringify(db, null, 2));
-        await fsp.rename(tmp, DB_FILE);
+        try {
+          await fsp.mkdir(DATA_DIR, { recursive: true });
+          const tmp = DB_FILE + '.tmp';
+          await fsp.writeFile(tmp, JSON.stringify(db, null, 2));
+          await fsp.rename(tmp, DB_FILE);
+          retries = 0;
+        } catch (err) {
+          console.error('Failed to save data file:', err.message);
+          retries += 1;
+          if (retries > 40) break; // persistent failure — stop spinning
+          saveQueued = true;
+          await new Promise((r) => setTimeout(r, 250));
+        }
       }
-    } catch (err) {
-      console.error('Failed to save data file:', err.message);
+    } finally {
+      saveRunning = false;
     }
-    saveRunning = false;
   })();
+}
+
+/* ------------------------------------------------------------------ history
+   Per-note revision sidecars: data/history/<noteId>.jsonl, one JSON object
+   per line. History never enters notes.json, is never scanned at startup,
+   and the directory is created lazily on the first append. */
+
+const sha256Hex = (s) => crypto.createHash('sha256').update(s).digest('hex');
+
+// The note id reaches the file system, so accept only UUID-shaped ids and
+// keep the resolved path inside data/history/ (same guard as serveStatic).
+function historyPath(noteId) {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(noteId)) return null;
+  const p = path.normalize(path.join(HISTORY_DIR, `${noteId}.jsonl`));
+  return p.startsWith(HISTORY_DIR + path.sep) ? p : null;
+}
+
+// Snapshot of a note state, tagged with the note's rev at capture time.
+// For "rejected" entries, `state` is the losing client payload instead.
+function historyEntry(note, kind, state = null) {
+  const s = state || note;
+  return {
+    ts: Date.now(),
+    rev: note.rev,
+    kind,
+    title: s.title,
+    content: s.content,
+    tags: Array.isArray(s.tags) ? s.tags : [],
+    pinned: s.pinned === true,
+    folderId: s.folderId != null ? s.folderId : null,
+    bytes: Buffer.byteLength(String(s.content || ''), 'utf8'),
+    hash: sha256Hex(String(s.content || '')),
+  };
+}
+
+function parseHistoryLine(line) {
+  try {
+    const o = JSON.parse(line);
+    return o && typeof o === 'object' ? o : null;
+  } catch {
+    return null;
+  }
+}
+
+async function readHistory(noteId) {
+  const file = historyPath(noteId);
+  if (!file) return [];
+  let text;
+  try {
+    text = await fsp.readFile(file, 'utf8');
+  } catch {
+    return []; // no file yet = no history
+  }
+  return text.split('\n').map(parseHistoryLine).filter(Boolean);
+}
+
+// Serialise sidecar writes per note so concurrent appends/trims cannot
+// interleave (the map holds the tail promise for each note id).
+const historyQueues = new Map();
+
+function appendHistory(noteId, entry) {
+  const file = historyPath(noteId);
+  if (!file) return Promise.resolve();
+  const run = async () => {
+    await fsp.mkdir(HISTORY_DIR, { recursive: true });
+    let lines = [];
+    try {
+      lines = (await fsp.readFile(file, 'utf8')).split('\n').filter((l) => l.trim());
+    } catch { /* no file yet */ }
+    const last = lines.length ? parseHistoryLine(lines[lines.length - 1]) : null;
+    // At most one "edit" entry per note per 60 seconds, and never the same
+    // content twice in a row. rejected/restore/trash/purge always append.
+    if (entry.kind === 'edit' && last &&
+        (entry.ts - last.ts < HISTORY_FLOOR_MS || last.hash === entry.hash)) {
+      return;
+    }
+    const line = JSON.stringify(entry);
+    if (lines.length < MAX_HISTORY_PER_NOTE) {
+      await fsp.appendFile(file, line + '\n');
+      return;
+    }
+    // Cap reached: rewrite the file with the newest MAX_HISTORY_PER_NOTE
+    // lines (tmp + rename, the same atomic pattern as saveDb).
+    const tmp = file + '.tmp';
+    await fsp.writeFile(tmp, [...lines.slice(-(MAX_HISTORY_PER_NOTE - 1)), line].join('\n') + '\n');
+    await fsp.rename(tmp, file);
+  };
+  const tail = (historyQueues.get(noteId) || Promise.resolve()).catch(() => {}).then(run);
+  historyQueues.set(noteId, tail);
+  tail.finally(() => {
+    if (historyQueues.get(noteId) === tail) historyQueues.delete(noteId);
+  }).catch(() => {});
+  return tail;
 }
 
 /* ------------------------------------------------------------------ accounts */
@@ -194,12 +311,21 @@ function findUserByName(name) {
 }
 
 function removeUser(user) {
+  // The account's history sidecars are deleted along with its notes; the
+  // whole account going away is one of the two allowed history deletions.
+  const noteIds = db.notes.filter((n) => n.userId === user.id).map((n) => n.id);
   db.users = db.users.filter((u) => u.id !== user.id);
   db.notes = db.notes.filter((n) => n.userId !== user.id);
   for (const [t, s] of Object.entries(db.sessions)) {
     if (s.uid === user.id) delete db.sessions[t];
   }
-  pruneOrphanUploads();
+  (async () => {
+    for (const id of noteIds) {
+      const file = historyPath(id);
+      if (file) await fsp.unlink(file).catch(() => {});
+    }
+    pruneOrphanUploads();
+  })();
 }
 
 /* ------------------------------------------------------------------ uploads */
@@ -255,8 +381,10 @@ function decodeUploadName(raw) {
   return name;
 }
 
-// Delete upload files that no note references any more. Called after a note
-// or an account is deleted.
+// Delete upload files nothing references any more. References live in every
+// note (trashed included — their files must survive) and in every line of
+// every history sidecar. Called after a purge, a trash-empty or an account
+// deletion; never after a plain soft delete.
 async function pruneOrphanUploads() {
   try {
     const files = await fsp.readdir(UPLOAD_DIR).catch(() => []);
@@ -264,8 +392,35 @@ async function pruneOrphanUploads() {
     const refs = new Set();
     const re = new RegExp(`/uploads/([a-f0-9]{32}\\.(?:${UPLOAD_EXT_RE}))`, 'g');
     for (const note of db.notes) {
+      re.lastIndex = 0;
       let m;
       while ((m = re.exec(note.content))) refs.add(m[1]);
+    }
+    // A history revision may be the last thing pointing at a file. If a
+    // sidecar cannot be read or parsed we cannot verify its references —
+    // skip the whole prune rather than risk deleting a live file.
+    const sidecars = await fsp.readdir(HISTORY_DIR).catch(() => []);
+    for (const f of sidecars) {
+      if (!f.endsWith('.jsonl')) continue;
+      let text;
+      try {
+        text = await fsp.readFile(path.join(HISTORY_DIR, f), 'utf8');
+      } catch (err) {
+        console.warn(`Upload prune skipped: cannot read history file ${f} (${err.message}).`);
+        return;
+      }
+      for (const line of text.split('\n')) {
+        if (!line.trim()) continue;
+        const entry = parseHistoryLine(line);
+        if (!entry) {
+          console.warn(`Upload prune skipped: malformed line in history file ${f}.`);
+          return;
+        }
+        re.lastIndex = 0;
+        let m;
+        const content = typeof entry.content === 'string' ? entry.content : '';
+        while ((m = re.exec(content))) refs.add(m[1]);
+      }
     }
     for (const f of files) {
       if (UPLOAD_NAME_RE.test(f) && !refs.has(f)) {
@@ -275,6 +430,29 @@ async function pruneOrphanUploads() {
     }
   } catch (err) {
     console.error('Upload prune failed:', err.message);
+  }
+}
+
+// Purge notes whose trash retention window has elapsed. Runs once at
+// startup and hourly; never blocks listening and only saves when it
+// actually purged something.
+async function sweepTrash() {
+  try {
+    const cutoff = Date.now() - db.settings.trashRetentionDays * 86400000;
+    const expired = db.notes.filter((n) => n.deletedAt != null && n.deletedAt < cutoff);
+    if (!expired.length) return;
+    const entries = expired.map((n) => historyEntry(n, 'purge'));
+    const ids = new Set(expired.map((n) => n.id));
+    db.notes = db.notes.filter((n) => !ids.has(n.id));
+    saveDb();
+    for (let i = 0; i < expired.length; i++) {
+      await appendHistory(expired[i].id, entries[i]);
+      if (historyPath(expired[i].id)) await fsp.unlink(historyPath(expired[i].id)).catch(() => {});
+    }
+    await pruneOrphanUploads();
+    log(`Trash retention purged ${expired.length} note(s).`);
+  } catch (err) {
+    console.error('Trash retention sweep failed:', err.message);
   }
 }
 
@@ -454,6 +632,8 @@ async function handleApi(req, res, pathname) {
       authenticated: !!user,
       user: user ? publicUser(user) : null,
       registrationOpen: db.settings.registrationOpen,
+      features: { trash: true, history: true, conflicts: true },
+      trashRetentionDays: db.settings.trashRetentionDays,
     });
   }
 
@@ -462,7 +642,7 @@ async function handleApi(req, res, pathname) {
   const shm = pathname.match(/^\/api\/share\/([a-f0-9]{32})$/);
   if (shm && method === 'GET') {
     const note = db.notes.find((n) => n.share && n.share.token === shm[1]);
-    if (!note) return sendJson(res, 404, { error: 'This link is no longer valid' });
+    if (!note || note.deletedAt != null) return sendJson(res, 404, { error: 'This link is no longer valid' });
     return sendJson(res, 200, { title: note.title, content: note.content, updatedAt: note.updatedAt });
   }
 
@@ -615,7 +795,7 @@ async function handleApi(req, res, pathname) {
     // client-side display concern.
     const folders = db.folders
       .filter((f) => f.userId === user.id)
-      .map((f) => ({ ...f, noteCount: db.notes.filter((n) => n.userId === user.id && n.folderId === f.id).length }));
+      .map((f) => ({ ...f, noteCount: db.notes.filter((n) => n.userId === user.id && n.folderId === f.id && n.deletedAt == null).length }));
     return sendJson(res, 200, { folders });
   }
 
@@ -690,7 +870,7 @@ async function handleApi(req, res, pathname) {
 
   if (pathname === '/api/notes' && method === 'GET') {
     const notes = db.notes
-      .filter((n) => n.userId === user.id)
+      .filter((n) => n.userId === user.id && n.deletedAt == null)
       .sort((a, b) => (b.pinned === true) - (a.pinned === true) || b.updatedAt - a.updatedAt);
     return sendJson(res, 200, { notes });
   }
@@ -702,7 +882,7 @@ async function handleApi(req, res, pathname) {
     const body = await readJson(req);
     const clean = sanitizeNote(body);
     const now = Date.now();
-    const note = { id: crypto.randomUUID(), userId: user.id, folderId: resolveFolderId(body.folderId, user), ...clean, createdAt: now, updatedAt: now };
+    const note = { id: crypto.randomUUID(), userId: user.id, folderId: resolveFolderId(body.folderId, user), ...clean, createdAt: now, updatedAt: now, rev: 1, deletedAt: null };
     db.notes.push(note);
     saveDb();
     return sendJson(res, 201, { note });
@@ -714,19 +894,61 @@ async function handleApi(req, res, pathname) {
     if (!note) return sendJson(res, 404, { error: 'Note not found' });
     if (method === 'PUT') {
       const body = await readJson(req);
+      if (note.deletedAt != null) {
+        return sendJson(res, 409, { error: 'This note is in the trash', code: 'trashed', note });
+      }
+      // Concurrency: a body without rev is a legacy client (last-write-wins);
+      // a rev that no longer matches lost a race — keep the losing payload in
+      // history, never merge. The check runs immediately before the mutation
+      // with no await in between, so interleaved requests cannot both pass.
+      if ('rev' in body) {
+        if (typeof body.rev !== 'number' || !Number.isFinite(body.rev)) {
+          return sendJson(res, 400, { error: 'rev must be a number' });
+        }
+        if (body.rev !== note.rev) {
+          await appendHistory(note.id, historyEntry(note, 'rejected', { ...sanitizeNote(body), folderId: resolveFolderId(body.folderId, user) }));
+          return sendJson(res, 409, { error: 'This note was changed on another device', code: 'conflict', note });
+        }
+      }
+      const entry = historyEntry(note, 'edit'); // the state before this update
       Object.assign(note, sanitizeNote(body), { updatedAt: Date.now() });
       // Only touch the folder when the client sends the field at all —
       // older clients (Android app) that don't know about folders must not
       // accidentally unfile notes.
       if ('folderId' in body) note.folderId = resolveFolderId(body.folderId, user);
+      note.rev += 1;
       saveDb();
+      await appendHistory(note.id, entry);
       return sendJson(res, 200, { note });
     }
     if (method === 'DELETE') {
-      db.notes = db.notes.filter((n) => n.id !== m[1]);
+      // Soft delete: the note stays in db.notes (it still counts against
+      // MAX_NOTES_PER_USER — trash must not become free storage) and keeps
+      // its history and uploads. Idempotent.
+      if (note.deletedAt != null) {
+        return sendJson(res, 200, { ok: true, deletedAt: note.deletedAt });
+      }
+      const entry = historyEntry(note, 'trash');
+      note.deletedAt = Date.now();
+      note.rev += 1;
+      // Cap the trash: purge the oldest trashed notes past the limit.
+      const overflow = db.notes
+        .filter((n) => n.userId === user.id && n.deletedAt != null && n.id !== note.id)
+        .sort((a, b) => a.deletedAt - b.deletedAt)
+        .slice(0, Math.max(0, db.notes.filter((n) => n.userId === user.id && n.deletedAt != null).length - MAX_TRASH_PER_USER));
+      const overflowEntries = overflow.map((n) => historyEntry(n, 'purge'));
+      if (overflow.length) {
+        const ids = new Set(overflow.map((n) => n.id));
+        db.notes = db.notes.filter((n) => !ids.has(n.id));
+      }
       saveDb();
-      pruneOrphanUploads();
-      return sendJson(res, 200, { ok: true });
+      await appendHistory(note.id, entry);
+      for (let i = 0; i < overflow.length; i++) {
+        await appendHistory(overflow[i].id, overflowEntries[i]);
+        if (historyPath(overflow[i].id)) await fsp.unlink(historyPath(overflow[i].id)).catch(() => {});
+      }
+      if (overflow.length) await pruneOrphanUploads();
+      return sendJson(res, 200, { ok: true, deletedAt: note.deletedAt });
     }
   }
 
@@ -745,6 +967,116 @@ async function handleApi(req, res, pathname) {
     saveDb();
     log(`Share link revoked for note ${note.id} by "${user.name}"`);
     return sendJson(res, 200, { ok: true });
+  }
+
+  /* ------------------------------------------------------------ trash */
+
+  if (pathname === '/api/trash' && method === 'GET') {
+    const notes = db.notes
+      .filter((n) => n.userId === user.id && n.deletedAt != null)
+      .sort((a, b) => b.deletedAt - a.deletedAt);
+    return sendJson(res, 200, { notes, total: notes.length });
+  }
+
+  // Restore from trash (idempotent: a live note is returned unchanged).
+  const rm = pathname.match(/^\/api\/notes\/([^/]+)\/restore$/);
+  if (rm && method === 'POST') {
+    const note = db.notes.find((n) => n.id === rm[1] && n.userId === user.id);
+    if (!note) return sendJson(res, 404, { error: 'Note not found' });
+    if (note.deletedAt != null) {
+      note.deletedAt = null;
+      note.updatedAt = Date.now();
+      note.rev += 1;
+      saveDb();
+    }
+    return sendJson(res, 200, { note });
+  }
+
+  // Permanent delete: drop the note, its history and (via the prune) any
+  // uploads only it still referenced.
+  const pg = pathname.match(/^\/api\/notes\/([^/]+)\/purge$/);
+  if (pg && method === 'POST') {
+    const note = db.notes.find((n) => n.id === pg[1] && n.userId === user.id);
+    if (!note) return sendJson(res, 404, { error: 'Note not found' });
+    const entry = historyEntry(note, 'purge');
+    db.notes = db.notes.filter((n) => n.id !== note.id);
+    saveDb();
+    await appendHistory(note.id, entry);
+    if (historyPath(note.id)) await fsp.unlink(historyPath(note.id)).catch(() => {});
+    await pruneOrphanUploads();
+    log(`Note ${note.id} purged by "${user.name}"`);
+    return sendJson(res, 200, { ok: true });
+  }
+
+  if (pathname === '/api/trash/empty' && method === 'POST') {
+    const trashed = db.notes.filter((n) => n.userId === user.id && n.deletedAt != null);
+    const entries = trashed.map((n) => historyEntry(n, 'purge'));
+    if (trashed.length) {
+      const ids = new Set(trashed.map((n) => n.id));
+      db.notes = db.notes.filter((n) => !ids.has(n.id));
+      saveDb();
+      for (let i = 0; i < trashed.length; i++) {
+        await appendHistory(trashed[i].id, entries[i]);
+        if (historyPath(trashed[i].id)) await fsp.unlink(historyPath(trashed[i].id)).catch(() => {});
+      }
+      await pruneOrphanUploads();
+    }
+    return sendJson(res, 200, { purged: trashed.length });
+  }
+
+  /* ------------------------------------------------------------ history */
+
+  const hl = pathname.match(/^\/api\/notes\/([^/]+)\/history$/);
+  if (hl && method === 'GET') {
+    const note = db.notes.find((n) => n.id === hl[1] && n.userId === user.id);
+    if (!note) return sendJson(res, 404, { error: 'Note not found' });
+    const revisions = (await readHistory(note.id))
+      .map((e) => ({ rev: e.rev, ts: e.ts, kind: e.kind, bytes: e.bytes, title: e.title, preview: String(e.content || '').slice(0, 120) }))
+      .sort((a, b) => b.ts - a.ts);
+    return sendJson(res, 200, { revisions });
+  }
+
+  const hr = pathname.match(/^\/api\/notes\/([^/]+)\/history\/([^/]+)$/);
+  if (hr && method === 'GET') {
+    const note = db.notes.find((n) => n.id === hr[1] && n.userId === user.id);
+    if (!note) return sendJson(res, 404, { error: 'Note not found' });
+    const hit = (await readHistory(note.id)).filter((e) => e.rev === Number(hr[2])).pop();
+    if (!hit) return sendJson(res, 404, { error: 'Revision not found' });
+    return sendJson(res, 200, { revision: hit });
+  }
+
+  // Restore an old revision. The current state is appended as a "restore"
+  // entry first, so the restore itself is undoable. Same conflict rules as
+  // a normal write: a stale rev in the body changes nothing.
+  const rhm = pathname.match(/^\/api\/notes\/([^/]+)\/history\/([^/]+)\/restore$/);
+  if (rhm && method === 'POST') {
+    const note = db.notes.find((n) => n.id === rhm[1] && n.userId === user.id);
+    if (!note) return sendJson(res, 404, { error: 'Note not found' });
+    if (note.deletedAt != null) {
+      return sendJson(res, 409, { error: 'This note is in the trash', code: 'trashed', note });
+    }
+    const revision = (await readHistory(note.id)).filter((e) => e.rev === Number(rhm[2])).pop();
+    if (!revision) return sendJson(res, 404, { error: 'Revision not found' });
+    const body = await readJson(req);
+    if ('rev' in body) {
+      if (typeof body.rev !== 'number' || !Number.isFinite(body.rev)) {
+        return sendJson(res, 400, { error: 'rev must be a number' });
+      }
+      if (body.rev !== note.rev) {
+        return sendJson(res, 409, { error: 'This note was changed on another device', code: 'conflict', note });
+      }
+    }
+    const entry = historyEntry(note, 'restore');
+    note.title = str(revision.title, 500);
+    note.content = str(revision.content, 1024 * 1024);
+    note.tags = sanitizeTags(revision.tags);
+    note.pinned = revision.pinned === true;
+    note.folderId = resolveFolderId(revision.folderId, user);
+    note.updatedAt = Date.now();
+    note.rev += 1;
+    saveDb();
+    await appendHistory(note.id, entry);
+    return sendJson(res, 200, { note });
   }
 
   /* ------------------------------------------------------------ admin */
@@ -852,7 +1184,7 @@ async function serveUpload(req, res, pathname) {
     if (q && SHARE_TOKEN_RE.test(q)) {
       const note = db.notes.find((n) => n.share && n.share.token === q);
       const name = pathname.slice('/uploads/'.length);
-      if (note && note.content.includes(name)) allowed = true;
+      if (note && note.deletedAt == null && note.content.includes(name)) allowed = true;
     }
   }
   if (!allowed) {
@@ -903,6 +1235,8 @@ async function route(req, res) {
 }
 
 loadDb().then(() => {
+  sweepTrash(); // fire-and-forget: startup never waits on the sweep
+  setInterval(sweepTrash, 60 * 60 * 1000);
   http
     .createServer((req, res) => {
       route(req, res).catch((err) => {

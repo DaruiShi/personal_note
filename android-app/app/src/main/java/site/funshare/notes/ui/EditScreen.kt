@@ -621,16 +621,41 @@ fun EditScreen(vm: AppViewModel) {
     if (deleteConfirm) {
         AlertDialog(
             onDismissRequest = { deleteConfirm = false },
-            title = { Text("Delete note?") },
-            text = { Text("This cannot be undone.") },
+            title = { Text("Move to trash?") },
+            text = { Text("You can restore it from Settings → Trash until the trash is emptied.") },
             confirmButton = {
                 TextButton(onClick = {
                     deleteConfirm = false
                     vm.deleteEditingNote()
-                }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+                }) { Text("Move to trash", color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = { TextButton(onClick = { deleteConfirm = false }) { Text("Cancel") } },
         )
+    }
+
+    /* A save lost the rev race: three explicit ways out, never a silent merge. */
+    vm.conflict?.let { c ->
+        if (vm.editingKey == c.noteId) {
+            AlertDialog(
+                onDismissRequest = { }, // a choice is required
+                title = { Text("This note changed elsewhere") },
+                text = {
+                    Text(
+                        "It was saved on another device after your last sync. Nothing is lost — " +
+                            "a version you discard stays recoverable on the server.",
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = { vm.resolveConflictKeepMine() }) { Text("Keep mine") }
+                },
+                dismissButton = {
+                    Row {
+                        TextButton(onClick = { vm.resolveConflictKeepBoth() }) { Text("Keep both") }
+                        TextButton(onClick = { vm.resolveConflictKeepTheirs() }) { Text("Keep theirs") }
+                    }
+                },
+            )
+        }
     }
 
     if (moveOpen) {

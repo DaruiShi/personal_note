@@ -34,6 +34,18 @@ browser (desktop or phone), and keep your notes private behind a login.
   (they return to "No folder"). Folders can be pinned to the top of the
   list and rearranged by dragging
 - Full-text search (`Ctrl+K`), tags with filter, pinned notes
+- **Trash (soft delete)** — deleting a note moves it to the trash, where it
+  can be restored for `trashRetentionDays` (default 30, 1–3650 configurable
+  in `data/notes.json` → `settings.trashRetentionDays`); an hourly sweep
+  purges expired notes permanently
+- **Version history** — every accepted edit is kept for each note (up to 50
+  versions, one per minute at most) in per-note sidecar files under
+  `data/history/`; any version can be previewed and restored, and restoring
+  is itself undoable
+- **Conflict detection** — notes carry a `rev` counter; if a note changed on
+  another device since you last saw it, saving asks whether to keep your
+  version, the other one, or both. Losing payloads are stored in history,
+  so nothing is silently discarded or merged
 - Auto-save while you type, with save status indicator
 - Dark / light theme (follows system preference, toggleable)
 - Responsive layout — works well on phones
@@ -136,8 +148,13 @@ systemd unit (and restart it) so login rate limiting sees real client IPs.
 ## Backups & recovery
 
 - **Backup:** copy the whole `data/` directory — `notes.json` (accounts,
-  sessions, notes) plus `uploads/` (images and attachments). *Export backup*
-  in the UI exports one account's notes as JSON (without files).
+  sessions, notes) plus `uploads/` (images and attachments) and `history/`
+  (per-note version sidecars). *Export backup* in the UI exports one
+  account's notes as JSON (without files).
+- **Deleted a note by accident:** open **Trash** in the sidebar (web) or
+  **Settings → Trash** (Android) and restore it. Notes stay in the trash for
+  the retention window (default 30 days); "Delete forever" or "Empty trash"
+  removes them immediately, together with their version history.
 - **Forgot a password:** passwords cannot be recovered (they are only
   stored as scrypt hashes). An admin deletes the account from
   **Manage users** and the person registers again; or edit
@@ -181,6 +198,8 @@ deploy/notes.service      systemd unit
 deploy/Caddyfile          reverse-proxy config with auto-HTTPS
 data/notes.json           created at runtime — accounts, sessions, notes
 data/uploads/             created at runtime — uploaded images and documents
+data/history/             created at runtime — per-note version sidecars
+test/                     node:test suite (npm test)
 ```
 
 ## Android app

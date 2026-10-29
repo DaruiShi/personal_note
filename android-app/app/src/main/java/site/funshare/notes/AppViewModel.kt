@@ -20,7 +20,11 @@ sealed interface Screen {
     data object Edit : Screen
     data object Settings : Screen
     data object Admin : Screen
+    data object Trash : Screen
 }
+
+/** A save lost the rev race; [server] is the winning version. */
+data class ConflictState(val noteId: String, val server: Note)
 
 sealed interface EditStatus {
     data object Idle : EditStatus
@@ -93,6 +97,9 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
     var editPinned by mutableStateOf(false)
     var editStatus by mutableStateOf<EditStatus>(EditStatus.Idle)
         private set
+    /** Non-null while a save hit a 409 and the user must pick a version. */
+    var conflict by mutableStateOf<ConflictState?>(null)
+        private set
     private var lastSavedSnapshot: String = ""
     private var autosaveJob: Job? = null
     /** Debounces folder reorder requests so rapid Up/Down taps don't race. */
@@ -101,6 +108,12 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
     /* admin state */
     var adminData by mutableStateOf<AdminData?>(null)
     var adminLoading by mutableStateOf(false)
+        private set
+
+    /* trash state */
+    var trash by mutableStateOf<List<Note>>(emptyList())
+        private set
+    var trashLoading by mutableStateOf(false)
         private set
 
     init {
@@ -309,7 +322,7 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
                     // folders are auxiliary — an older server or a hiccup
                     // must not break the notes list
                 }
-            } catch (e: ApiError) {
+            } catch (e: ApiException) {
                 if (e.status == 401) sessionExpired() else offline = true
             } catch (e: Exception) {
                 offline = true
@@ -465,6 +478,7 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
             try {
                 val updated = api.updateNote(
                     note.id, note.title, note.content, note.tags, note.pinned, target,
+                    rev = note.rev.takeIf { it > 0 },
                 )
                 notes = sortNotes(notes.map { if (it.id == id) updated else it })
                 store.cachedNotes = notes
@@ -476,7 +490,7 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
                     }
                 }
                 postMessage("Moved to \"${folderName(target).ifEmpty { "Unfiled" }}\"")
-            } catch (e: ApiError) {
+            } catch (e: ApiException) {
                 if (e.status == 401) sessionExpired() else postMessage(Api.describeError(e))
             } catch (e: Exception) {
                 postMessage(Api.describeError(e))
@@ -494,7 +508,7 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
                     editingId = created.id
                     if (backStack.lastOrNull() == Screen.Edit) replaceTop(Screen.Edit)
                 }
-            } catch (e: ApiError) {
+            } catch (e: ApiException) {
                 if (e.status == 401) { sessionExpired(); return }
                 break // server error: keep the rest as drafts
             } catch (e: IOException) {
@@ -520,8 +534,8 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
                 api.deleteNote(id)
                 notes = notes.filterNot { it.id == id }
                 store.cachedNotes = notes
-                postMessage("Note deleted")
-            } catch (e: ApiError) {
+                postMessage("Note moved to trash")
+            } catch (e: ApiException) {
                 if (e.status == 401) sessionExpired() else postMessage(Api.describeError(e))
             } catch (e: Exception) {
                 postMessage(Api.describeError(e))
@@ -535,6 +549,7 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
             try {
                 val updated = api.updateNote(
                     note.id, note.title, note.content, note.tags, !note.pinned, note.folderId,
+                    rev = note.rev.takeIf { it > 0 },
                 )
                 notes = sortNotes(notes.map { if (it.id == id) updated else it })
                 store.cachedNotes = notes
@@ -549,6 +564,7 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
     fun openEditor(id: String) {
         val note = if (id == "new") null else notes.firstOrNull { it.id == id }
         editingId = id
+        conflict = null
         editStartInPreview = note != null
         pendingDraftFolderId = null
         editTitle = note?.title ?: ""
@@ -571,6 +587,7 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
 
     /** Called on every editor keystroke — schedules the debounced autosave. */
     fun onEditorChanged() {
+        if (conflict != null) return // a pending conflict blocks autosave
         editStatus = EditStatus.Idle
         autosaveJob?.cancel()
         autosaveJob = viewModelScope.launch {
@@ -583,7 +600,7 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
     fun autosaveNow() {
         if (backStack.lastOrNull() != Screen.Edit) return
         autosaveJob?.cancel()
-        if (!editorDirty()) return
+        if (!editorDirty() || conflict != null) return
         val id = editingId ?: return
         viewModelScope.launch { saveEditor(id) }
     }
@@ -629,6 +646,7 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
                     val updated = api.updateNote(
                         id, editTitle, editContent, editTags, editPinned,
                         folderId = pendingDraftFolderId ?: current?.folderId,
+                        rev = current?.rev?.takeIf { it > 0 },
                     )
                     pendingDraftFolderId = null
                     notes = sortNotes(notes.map { if (it.id == id) updated else it })
@@ -638,10 +656,19 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
                 store.cachedNotes = notes
                 store.pendingNotes = notes.filter { it.isLocal }
                 offline = false
-            } catch (e: ApiError) {
+            } catch (e: ApiException) {
                 if (e.status == 401) {
                     sessionExpired()
                     return@launch
+                }
+                if (e.status == 409 && e.code == "conflict") {
+                    val server = e.payload?.optJSONObject("note")?.let { Note.fromJson(it) }
+                    if (server != null) {
+                        // Park the editor on the conflict: never auto-retry, never merge.
+                        conflict = ConflictState(noteId = id, server = server)
+                        editStatus = EditStatus.Idle
+                        return@launch
+                    }
                 }
                 keepAsLocalDraft(id, snap, Api.describeError(e))
             } catch (e: Exception) {
@@ -671,6 +698,7 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
         val id = editingId ?: return
         autosaveJob?.cancel()
         editingId = null
+        conflict = null
         deleteNote(id)
         backStack = backStack.filterNot { it == Screen.Edit }
     }
@@ -678,6 +706,134 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
     fun closeEditor() {
         autosaveNow()
         editingId = null
+    }
+
+    /* -------------------------------------------------------- conflicts */
+
+    /** Replace the editor + list with the server's winning version. */
+    private fun adoptServerVersion(server: Note) {
+        if (editingId == server.id) {
+            editTitle = server.title
+            editContent = server.content
+            editTags = server.tags
+            editPinned = server.pinned
+            lastSavedSnapshot = editorSnapshot()
+            editStatus = EditStatus.Saved(server.updatedAt)
+        }
+        notes = sortNotes(notes.map { if (it.id == server.id) server else it })
+        store.cachedNotes = notes
+    }
+
+    /** "Keep mine": overwrite the server version using its rev. */
+    fun resolveConflictKeepMine() {
+        val c = conflict ?: return
+        conflict = null
+        if (editingId != c.noteId) return
+        viewModelScope.launch {
+            editStatus = EditStatus.Saving
+            val snap = editorSnapshot()
+            try {
+                val updated = api.updateNote(
+                    c.noteId, editTitle, editContent, editTags, editPinned,
+                    folderId = pendingDraftFolderId ?: c.server.folderId,
+                    rev = c.server.rev,
+                )
+                pendingDraftFolderId = null
+                notes = sortNotes(notes.map { if (it.id == c.noteId) updated else it })
+                lastSavedSnapshot = snap
+                editStatus = EditStatus.Saved(System.currentTimeMillis())
+                store.cachedNotes = notes
+            } catch (e: Exception) {
+                postMessage(Api.describeError(e))
+                editStatus = EditStatus.Idle
+            }
+        }
+    }
+
+    /** "Keep theirs": load the server version into the editor. */
+    fun resolveConflictKeepTheirs() {
+        val c = conflict ?: return
+        conflict = null
+        adoptServerVersion(c.server)
+        postMessage("Loaded the newer version")
+    }
+
+    /** "Keep both": save the local text as a copy, then load the server version. */
+    fun resolveConflictKeepBoth() {
+        val c = conflict ?: return
+        conflict = null
+        val localTitle = editTitle
+        val localContent = editContent
+        val localTags = editTags
+        val localPinned = editPinned
+        viewModelScope.launch {
+            try {
+                val copy = api.createNote(
+                    "${localTitle.ifBlank { "Untitled" }} (conflict copy)",
+                    localContent, localTags, localPinned,
+                    folderId = pendingDraftFolderId ?: c.server.folderId,
+                )
+                notes = sortNotes(notes + copy)
+                store.cachedNotes = notes
+            } catch (e: Exception) {
+                postMessage("Couldn't create the copy — ${Api.describeError(e)}")
+            }
+            adoptServerVersion(c.server)
+            postMessage("Kept both — your version was saved as a copy")
+        }
+    }
+
+    /* ----------------------------------------------------------- trash */
+
+    fun loadTrash() {
+        viewModelScope.launch {
+            trashLoading = true
+            try {
+                trash = api.listTrash()
+            } catch (e: Exception) {
+                postMessage(Api.describeError(e))
+            } finally {
+                trashLoading = false
+            }
+        }
+    }
+
+    fun restoreFromTrash(id: String) {
+        viewModelScope.launch {
+            try {
+                val restored = api.restoreNote(id)
+                trash = trash.filterNot { it.id == id }
+                notes = sortNotes(notes + restored)
+                store.cachedNotes = notes
+                postMessage("Note restored")
+            } catch (e: Exception) {
+                postMessage(Api.describeError(e))
+            }
+        }
+    }
+
+    fun purgeFromTrash(id: String) {
+        viewModelScope.launch {
+            try {
+                api.purgeNote(id)
+                trash = trash.filterNot { it.id == id }
+                postMessage("Deleted forever")
+            } catch (e: Exception) {
+                postMessage(Api.describeError(e))
+            }
+        }
+    }
+
+    fun emptyTrash() {
+        viewModelScope.launch {
+            try {
+                val n = api.emptyTrash()
+                trash = emptyList()
+                postMessage("Trash emptied — $n note(s) removed")
+            } catch (e: Exception) {
+                postMessage(Api.describeError(e))
+            }
+        }
     }
 
     /* --------------------------------------------------------- settings */

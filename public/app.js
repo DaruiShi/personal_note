@@ -34,6 +34,7 @@
     x: (s = 14) => svg(`<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>`, s),
     download: (s = 14) => svg(`<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>`, s),
     pen: (s = 26) => svg(`<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>`, s),
+    history: (s = 17) => svg(`<circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/>`, s),
   };
 
   /* ================================================================ markdown
@@ -446,6 +447,9 @@
     folderFilter: null,
     saveTimer: null,
     saving: false,
+    conflict: null,
+    trashCache: [],
+    trashRetentionDays: 30,
     previewFont: (() => {
       const v = parseFloat(localStorage.getItem('previewFontSize'));
       return v >= 12 && v <= 24 ? v : 15.5;
@@ -478,6 +482,15 @@
     saveStatus: $('save-status'), wordCount: $('word-count'),
     modal: $('modal'), modalTitle: $('modal-title'), modalText: $('modal-text'),
     modalCancel: $('modal-cancel'), modalConfirm: $('modal-confirm'),
+    conflictModal: $('conflict-modal'), conflictText: $('conflict-text'),
+    conflictMine: $('conflict-mine'), conflictTheirs: $('conflict-theirs'), conflictBoth: $('conflict-both'),
+    trashBtn: $('trash-btn'), trashIc: $('trash-ic'), trashCount: $('trash-count'),
+    trashModal: $('trash-modal'), trashList: $('trash-list'), trashEmpty: $('trash-empty'),
+    trashClose: $('trash-close'), trashRetention: $('trash-retention'),
+    historyBtn: $('history-btn'), historyModal: $('history-modal'), historyList: $('history-list'),
+    historyDetail: $('history-detail'), historyContent: $('history-content'),
+    historyBack: $('history-back'), historyRestoreBtn: $('history-restore'),
+    historyClose: $('history-close'), historyCloseRow: $('history-close-row'),
     accountModal: $('account-modal'), acctUser: $('acct-user'),
     pwForm: $('pw-form'), pwCurrent: $('pw-current'), pwNew: $('pw-new'), pwNew2: $('pw-new2'),
     pwSubmit: $('pw-submit'), pwMsg: $('pw-msg'),
@@ -486,7 +499,7 @@
     deleteAcctPw: $('delete-acct-pw'), deleteAcctCancel: $('delete-acct-cancel'), deleteAcctMsg: $('delete-acct-msg'),
     manageUsersRow: $('manage-users-row'), manageUsersBtn: $('manage-users-btn'), accountClose: $('account-close'),
     usersModal: $('users-modal'), usersList: $('users-list'), usersClose: $('users-close'), regToggle: $('reg-toggle'),
-    toast: $('toast'), metaTheme: $('meta-theme-color'),
+    toast: $('toast'), toastMsg: $('toast-msg'), toastAction: $('toast-action'), metaTheme: $('meta-theme-color'),
   };
 
   const current = () => state.notes.find((n) => n.id === state.currentId) || null;
@@ -504,18 +517,40 @@
       throw new Error('Signed out');
     }
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+    if (!res.ok) {
+      const err = new Error(data.error || `Request failed (${res.status})`);
+      err.status = res.status;
+      err.code = data.code;
+      err.payload = data;
+      throw err;
+    }
     return data;
   }
 
   /* ================================================================ toast / modal */
 
   let toastTimer = null;
-  function toast(msg) {
-    ui.toast.textContent = msg;
+  function toast(msg, opts = {}) {
+    ui.toastMsg.textContent = msg;
+    ui.toastAction.classList.toggle('hidden', !opts.action);
+    if (opts.action) {
+      ui.toastAction.textContent = opts.action;
+      ui.toastAction.onclick = () => {
+        hideToast();
+        opts.onAction && opts.onAction();
+      };
+    } else {
+      ui.toastAction.onclick = null;
+    }
     ui.toast.classList.add('show');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => ui.toast.classList.remove('show'), 2600);
+    toastTimer = setTimeout(hideToast, 2600);
+  }
+
+  function hideToast() {
+    clearTimeout(toastTimer);
+    ui.toast.classList.remove('show');
+    ui.toastAction.onclick = null;
   }
 
   function confirmModal({ title, text, confirmText = 'Delete' }) {
@@ -642,6 +677,7 @@
     const target = state.notes.find((n) => n.id === last) || visibleNotes()[0];
     if (target) selectNote(target.id);
     else showEmptyState();
+    refreshTrashCount(); // sidecar to the first paint — never block on it
   }
 
   function showEmptyState() {
@@ -1086,6 +1122,8 @@
   }
 
   async function flushSave() {
+    state.conflict = null;
+    ui.conflictModal.classList.add('hidden');
     if (state.saveTimer !== null) {
       clearTimeout(state.saveTimer);
       state.saveTimer = null;
@@ -1105,21 +1143,47 @@
     try {
       const { note: updated } = await api(`/api/notes/${note.id}`, {
         method: 'PUT',
-        body: { title: note.title, content: note.content, tags: note.tags, pinned: note.pinned, folderId: note.folderId || null },
+        body: {
+          title: note.title, content: note.content, tags: note.tags,
+          pinned: note.pinned, folderId: note.folderId || null, rev: note.rev,
+        },
       });
       note.updatedAt = updated.updatedAt;
+      note.rev = updated.rev;
       state.saving = false;
       const time = new Date(note.updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       setSaveStatus('saved', `Saved ${time}`);
       renderList();
     } catch (err) {
       state.saving = false;
+      if (err.code === 'conflict' && err.payload && err.payload.note) {
+        handleConflict(note, err.payload.note);
+        setSaveStatus('pending'); // not an error — waiting for the user to choose
+        return;
+      }
+      if (err.code === 'trashed') {
+        setSaveStatus('pending');
+        toast('This note was deleted on another device', {
+          action: 'Restore',
+          onAction: async () => {
+            try {
+              const { note: restored } = await api(`/api/notes/${note.id}/restore`, { method: 'POST' });
+              note.rev = restored.rev;
+              await saveNote(note);
+            } catch (e2) {
+              toast(`Restore failed: ${e2.message}`);
+            }
+          },
+        });
+        return;
+      }
       setSaveStatus('error');
       toast(`Save failed: ${err.message}`);
     }
   }
 
   function scheduleSave() {
+    if (state.conflict) return; // autosave must not spin against a conflict
     setSaveStatus('pending');
     clearTimeout(state.saveTimer);
     state.saveTimer = setTimeout(() => {
@@ -1140,6 +1204,98 @@
       updateCount();
     }
   }
+
+  /* ---------- conflict resolution ---------- */
+
+  const fmtDateTime = (ts) =>
+    new Date(ts).toLocaleString([], { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+
+  function handleConflict(note, serverNote) {
+    state.conflict = {
+      noteId: note.id,
+      server: serverNote,
+      local: { title: note.title, content: note.content, tags: [...note.tags], pinned: note.pinned, folderId: note.folderId },
+    };
+    ui.conflictText.textContent =
+      `Your copy was last saved ${fmtDateTime(note.updatedAt)}; the other device saved at ${fmtDateTime(serverNote.updatedAt)}. ` +
+      'Nothing is lost either way — a version you discard stays in Version history.';
+    ui.conflictModal.classList.remove('hidden');
+    ui.conflictMine.focus();
+  }
+
+  function closeConflict() {
+    state.conflict = null;
+    ui.conflictModal.classList.add('hidden');
+  }
+
+  // Replace the local buffer with the server's state.
+  function applyServerNote(note, serverNote) {
+    note.title = serverNote.title;
+    note.content = serverNote.content;
+    note.tags = [...(serverNote.tags || [])];
+    note.pinned = serverNote.pinned === true;
+    note.folderId = serverNote.folderId != null ? serverNote.folderId : null;
+    note.updatedAt = serverNote.updatedAt;
+    note.rev = serverNote.rev;
+    if (state.currentId === note.id) {
+      ui.title.value = note.title;
+      ui.content.value = note.content;
+      renderTagChips();
+      renderFolderOptions();
+      updatePinBtn();
+      updateWordCount();
+      if (state.mode === 'preview') renderPreview();
+    }
+  }
+
+  ui.conflictMine.addEventListener('click', async () => {
+    const c = state.conflict;
+    if (!c) return;
+    const note = state.notes.find((n) => n.id === c.noteId);
+    closeConflict();
+    if (!note) return;
+    note.rev = c.server.rev; // overwrite the newer version with ours
+    setSaveStatus('pending');
+    await saveNote(note);
+  });
+
+  ui.conflictTheirs.addEventListener('click', () => {
+    const c = state.conflict;
+    if (!c) return;
+    const note = state.notes.find((n) => n.id === c.noteId);
+    closeConflict();
+    if (!note) return;
+    applyServerNote(note, c.server);
+    setSaveStatus('idle');
+    renderList();
+    toast('Loaded the newer version');
+  });
+
+  ui.conflictBoth.addEventListener('click', async () => {
+    const c = state.conflict;
+    if (!c) return;
+    const note = state.notes.find((n) => n.id === c.noteId);
+    closeConflict();
+    if (!note) return;
+    try {
+      const { note: copy } = await api('/api/notes', {
+        method: 'POST',
+        body: {
+          title: `${c.local.title || 'Untitled'} (conflict copy)`,
+          content: c.local.content, tags: c.local.tags, pinned: c.local.pinned,
+          folderId: c.local.folderId || null,
+        },
+      });
+      state.notes.unshift(copy);
+      updateCount();
+    } catch (err) {
+      toast(`Could not create the copy: ${err.message}`);
+    }
+    applyServerNote(note, c.server); // the original goes back to the server state
+    setSaveStatus('idle');
+    renderList();
+    toast('Kept both — your version was saved as a copy');
+  });
 
   function updateWordCount() {
     const note = current();
@@ -1519,23 +1675,40 @@
     if (!note) return;
     await flushSave();
     const ok = await confirmModal({
-      title: 'Delete note?',
-      text: `“${note.title || 'Untitled'}” will be permanently removed. This cannot be undone.`,
+      title: 'Move to trash?',
+      text: `“${note.title || 'Untitled'}” will be moved to the trash. You can restore it for ${state.trashRetentionDays} days.`,
+      confirmText: 'Move to trash',
     });
     if (!ok) return;
+    const id = note.id;
     try {
-      await api(`/api/notes/${note.id}`, { method: 'DELETE' });
+      await api(`/api/notes/${id}`, { method: 'DELETE' });
     } catch (err) {
       toast(`Delete failed: ${err.message}`);
       return;
     }
-    state.notes = state.notes.filter((n) => n.id !== note.id);
-    if (localStorage.getItem('lastNoteId') === note.id) localStorage.removeItem('lastNoteId');
+    state.notes = state.notes.filter((n) => n.id !== id);
+    if (localStorage.getItem('lastNoteId') === id) localStorage.removeItem('lastNoteId');
     updateCount();
+    refreshTrashCount();
     const next = visibleNotes()[0];
     if (next) selectNote(next.id);
     else showEmptyState();
-    toast('Note deleted');
+    toast('Moved to trash', {
+      action: 'Undo',
+      onAction: async () => {
+        try {
+          const { note: restored } = await api(`/api/notes/${id}/restore`, { method: 'POST' });
+          state.notes.push(restored);
+          updateCount();
+          refreshTrashCount();
+          renderList();
+          toast('Note restored');
+        } catch (err) {
+          toast(`Restore failed: ${err.message}`);
+        }
+      },
+    });
   });
 
   /* ---------- new note ---------- */
@@ -1655,6 +1828,209 @@
     a.click();
     URL.revokeObjectURL(a.href);
     toast('Backup downloaded');
+  });
+
+  /* ================================================================ trash */
+
+  function renderTrashCount() {
+    ui.trashCount.textContent = state.trashCache.length ? `(${state.trashCache.length})` : '';
+  }
+
+  async function refreshTrashCount() {
+    try {
+      const data = await api('/api/trash');
+      state.trashCache = data.notes || [];
+    } catch {
+      state.trashCache = []; // old server without trash — nothing to count
+    }
+    renderTrashCount();
+  }
+
+  function openTrashModal() {
+    ui.trashRetention.textContent = state.trashRetentionDays;
+    renderTrashList();
+    ui.trashModal.classList.remove('hidden');
+  }
+
+  function renderTrashList() {
+    ui.trashList.innerHTML = '';
+    if (!state.trashCache.length) {
+      ui.trashList.append(el('div', 'list-empty', 'Trash is empty.'));
+      ui.trashEmpty.classList.add('hidden');
+      return;
+    }
+    ui.trashEmpty.classList.remove('hidden');
+    for (const note of state.trashCache) {
+      const row = el('div', 'trash-row');
+      const meta = el('div', 'trash-meta');
+      meta.append(el('span', 'trash-title', note.title || 'Untitled'));
+      meta.append(el('span', 'trash-sub', `deleted ${fmtRel(note.deletedAt)}`));
+      const actions = el('div', 'trash-actions');
+      const restore = el('button', 'btn sm');
+      restore.type = 'button';
+      restore.textContent = 'Restore';
+      restore.addEventListener('click', async () => {
+        try {
+          const { note: restoredNote } = await api(`/api/notes/${note.id}/restore`, { method: 'POST' });
+          state.trashCache = state.trashCache.filter((n) => n.id !== note.id);
+          state.notes.push(restoredNote);
+          updateCount();
+          renderTrashCount();
+          renderTrashList();
+          renderList();
+          toast('Note restored');
+        } catch (err) {
+          toast(`Restore failed: ${err.message}`);
+        }
+      });
+      const forever = el('button', 'btn sm danger-outline');
+      forever.type = 'button';
+      forever.textContent = 'Delete forever';
+      forever.addEventListener('click', async () => {
+        const ok = await confirmModal({
+          title: 'Delete forever?',
+          text: `“${note.title || 'Untitled'}” will be permanently removed, including its version history. This cannot be undone.`,
+        });
+        if (!ok) return;
+        try {
+          await api(`/api/notes/${note.id}/purge`, { method: 'POST' });
+          state.trashCache = state.trashCache.filter((n) => n.id !== note.id);
+          renderTrashCount();
+          renderTrashList();
+          toast('Deleted forever');
+        } catch (err) {
+          toast(`Delete failed: ${err.message}`);
+        }
+      });
+      actions.append(restore, forever);
+      row.append(meta, actions);
+      ui.trashList.append(row);
+    }
+  }
+
+  ui.trashBtn.addEventListener('click', () => {
+    openTrashModal();
+    refreshTrashCount().then(renderTrashList);
+  });
+  ui.trashClose.addEventListener('click', () => ui.trashModal.classList.add('hidden'));
+  ui.trashModal.addEventListener('click', (e) => {
+    if (e.target === ui.trashModal) ui.trashModal.classList.add('hidden');
+  });
+
+  ui.trashEmpty.addEventListener('click', async () => {
+    const ok = await confirmModal({
+      title: 'Empty trash?',
+      text: `All ${state.trashCache.length} notes in the trash will be permanently removed, including their version history.`,
+      confirmText: 'Empty trash',
+    });
+    if (!ok) return;
+    try {
+      await api('/api/trash/empty', { method: 'POST' });
+      state.trashCache = [];
+      renderTrashCount();
+      renderTrashList();
+      toast('Trash emptied');
+    } catch (err) {
+      toast(err.message);
+    }
+  });
+
+  /* ================================================================ history */
+
+  const fmtBytes = (n) => {
+    if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+    if (n >= 1024) return `${(n / 1024).toFixed(1)} kB`;
+    return `${n} B`;
+  };
+
+  let historyRev = null; // the revision currently shown in the detail view
+
+  function closeHistoryModal() {
+    ui.historyModal.classList.add('hidden');
+    historyRev = null;
+  }
+
+  async function openHistoryModal() {
+    const note = current();
+    if (!note) return;
+    ui.historyDetail.classList.add('hidden');
+    ui.historyCloseRow.classList.remove('hidden');
+    ui.historyList.innerHTML = '';
+    ui.historyList.append(el('div', 'list-empty', 'Loading…'));
+    ui.historyModal.classList.remove('hidden');
+    try {
+      const { revisions } = await api(`/api/notes/${note.id}/history`);
+      ui.historyList.innerHTML = '';
+      if (!revisions.length) {
+        ui.historyList.append(el('div', 'list-empty', 'No saved versions yet'));
+        return;
+      }
+      for (const r of revisions) {
+        const row = el('button', 'history-row');
+        row.type = 'button';
+        row.append(el('span', 'history-when', fmtRel(r.ts)));
+        row.append(el('span', 'history-size', `${fmtBytes(r.bytes || 0)} · ${r.kind}`));
+        row.addEventListener('click', () => showRevision(note.id, r.rev));
+        ui.historyList.append(row);
+      }
+    } catch (err) {
+      ui.historyList.innerHTML = '';
+      ui.historyList.append(el('div', 'list-empty', err.message));
+    }
+  }
+
+  async function showRevision(noteId, rev) {
+    try {
+      const { revision } = await api(`/api/notes/${noteId}/history/${rev}`);
+      historyRev = rev;
+      ui.historyContent.innerHTML = MD.render(revision.content);
+      ui.historyList.classList.add('hidden');
+      ui.historyDetail.classList.remove('hidden');
+      ui.historyCloseRow.classList.add('hidden');
+    } catch (err) {
+      toast(err.message);
+    }
+  }
+
+  ui.historyBtn.addEventListener('click', openHistoryModal);
+  ui.historyClose.addEventListener('click', closeHistoryModal);
+  ui.historyModal.addEventListener('click', (e) => {
+    if (e.target === ui.historyModal) closeHistoryModal();
+  });
+  ui.historyBack.addEventListener('click', () => {
+    ui.historyDetail.classList.add('hidden');
+    ui.historyList.classList.remove('hidden');
+    ui.historyCloseRow.classList.remove('hidden');
+    historyRev = null;
+  });
+
+  ui.historyRestoreBtn.addEventListener('click', async () => {
+    const note = current();
+    if (!note || historyRev == null) return;
+    const ok = await confirmModal({
+      title: 'Restore this version?',
+      text: 'The current content will be kept in Version history, so this can be undone too.',
+      confirmText: 'Restore',
+    });
+    if (!ok) return;
+    try {
+      const { note: restored } = await api(`/api/notes/${note.id}/history/${historyRev}/restore`, {
+        method: 'POST',
+        body: { rev: note.rev },
+      });
+      closeHistoryModal();
+      applyServerNote(note, restored);
+      setSaveStatus('idle');
+      renderList();
+      toast('Version restored');
+    } catch (err) {
+      if (err.code === 'conflict' && err.payload && err.payload.note) {
+        closeHistoryModal();
+        handleConflict(note, err.payload.note);
+        return;
+      }
+      toast(`Restore failed: ${err.message}`);
+    }
   });
 
   /* ================================================================ account */
@@ -2013,6 +2389,10 @@
     }
     if (e.key === 'Escape') {
       if (!ui.modal.classList.contains('hidden')) ui.modalCancel.click();
+      // the conflict modal deliberately has no Escape shortcut: every choice
+      // discards something, so it must be picked explicitly
+      else if (!ui.historyModal.classList.contains('hidden')) closeHistoryModal();
+      else if (!ui.trashModal.classList.contains('hidden')) ui.trashModal.classList.add('hidden');
       else if (!ui.usersModal.classList.contains('hidden')) ui.usersModal.classList.add('hidden');
       else if (!ui.accountModal.classList.contains('hidden')) closeAccountModal();
       else if (!ui.shareModal.classList.contains('hidden')) closeShareModal();
@@ -2037,6 +2417,8 @@
     ui.logoutBtn.innerHTML = ICONS.logout();
     ui.menuBtn.innerHTML = ICONS.menu(20);
     ui.delBtn.innerHTML = ICONS.trash();
+    ui.trashIc.innerHTML = ICONS.trash(14);
+    ui.historyBtn.innerHTML = ICONS.history();
     ui.exportIc.innerHTML = ICONS.download();
     ui.emptyIc.innerHTML = ICONS.pen(26);
     updatePinBtn();
@@ -2062,6 +2444,7 @@
     try {
       const s = await api('/api/session');
       state.registrationOpen = s.registrationOpen !== false;
+      if (Number.isFinite(s.trashRetentionDays)) state.trashRetentionDays = s.trashRetentionDays;
       if (s.needsSetup) showAuth('setup');
       else if (s.authenticated) {
         state.user = s.user;

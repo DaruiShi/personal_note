@@ -21,8 +21,13 @@ import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLContext
 import javax.net.ssl.X509TrustManager
 
-/** Server returned a non-2xx response. */
-class ApiError(val status: Int, message: String) : Exception(message)
+/** Server returned a non-2xx response; [code] is the machine-readable code ("conflict", "trashed") when present. */
+class ApiException(
+    val status: Int,
+    val code: String?,
+    val payload: JSONObject? = null,
+    message: String,
+) : Exception(message)
 
 /**
  * Percent-encode a file name for the X-File-Name header. HTTP header values
@@ -101,7 +106,12 @@ class Api(private val store: Store) {
             val text = try { resp.body?.string() ?: "" } catch (e: Exception) { "" }
             val json = try { JSONObject(text) } catch (e: Exception) { JSONObject() }
             if (!resp.isSuccessful) {
-                throw ApiError(resp.code, json.optString("error").ifEmpty { "HTTP ${resp.code}" })
+                throw ApiException(
+                    resp.code,
+                    json.optString("code").ifEmpty { null },
+                    json,
+                    json.optString("error").ifEmpty { "HTTP ${resp.code}" },
+                )
             }
             json
         }
@@ -190,11 +200,37 @@ class Api(private val store: Store) {
         tags: List<String>,
         pinned: Boolean,
         folderId: String? = null,
-    ): Note = parseNote(request("PUT", "/api/notes/$id", noteBody(title, content, tags, pinned, folderId)))
+        rev: Int? = null,
+    ): Note {
+        val body = noteBody(title, content, tags, pinned, folderId)
+        if (rev != null) body.put("rev", rev)
+        return parseNote(request("PUT", "/api/notes/$id", body))
+    }
 
     suspend fun deleteNote(id: String) {
         request("DELETE", "/api/notes/$id")
     }
+
+    /* --------------------------------------------------------------- trash */
+
+    /** Notes currently in the trash, newest deleted first. */
+    suspend fun listTrash(): List<Note> {
+        val j = request("GET", "/api/trash")
+        val a = j.optJSONArray("notes") ?: JSONArray()
+        return List(a.length()) { Note.fromJson(a.optJSONObject(it)) }
+    }
+
+    /** Restore a trashed note; returns it live, with a bumped rev. */
+    suspend fun restoreNote(id: String): Note =
+        parseNote(request("POST", "/api/notes/$id/restore"))
+
+    /** Permanently delete a note (the trash view's "delete forever"). */
+    suspend fun purgeNote(id: String) {
+        request("POST", "/api/notes/$id/purge")
+    }
+
+    /** Permanently delete every trashed note; returns how many went. */
+    suspend fun emptyTrash(): Int = request("POST", "/api/trash/empty").optInt("purged")
 
     /* -------------------------------------------------------------- folders */
 
@@ -257,10 +293,15 @@ class Api(private val store: Store) {
             val text = try { resp.body?.string() ?: "" } catch (e: Exception) { "" }
             val json = try { JSONObject(text) } catch (e: Exception) { JSONObject() }
             if (!resp.isSuccessful) {
-                throw ApiError(resp.code, json.optString("error").ifEmpty { "HTTP ${resp.code}" })
+                throw ApiException(
+                    resp.code,
+                    json.optString("code").ifEmpty { null },
+                    json,
+                    json.optString("error").ifEmpty { "HTTP ${resp.code}" },
+                )
             }
             val url = json.optString("url")
-            if (url.isEmpty()) throw ApiError(resp.code, "Upload response missing url")
+            if (url.isEmpty()) throw ApiException(resp.code, null, json, "Upload response missing url")
             url
         }
     }
@@ -271,8 +312,8 @@ class Api(private val store: Store) {
         client.newCall(req).execute().use { resp ->
             val text = try { resp.body?.string() ?: "" } catch (e: Exception) { "" }
             val json = try { JSONObject(text) } catch (e: Exception) { JSONObject() }
-            if (!resp.isSuccessful) throw ApiError(resp.code, json.optString("error").ifEmpty { "HTTP ${resp.code}" })
-            json.optString("url").ifEmpty { throw ApiError(resp.code, "Share response missing url") }
+            if (!resp.isSuccessful) throw ApiException(resp.code, json.optString("code").ifEmpty { null }, json, json.optString("error").ifEmpty { "HTTP ${resp.code}" })
+            json.optString("url").ifEmpty { throw ApiException(resp.code, null, json, "Share response missing url") }
         }
     }
 
@@ -284,7 +325,7 @@ class Api(private val store: Store) {
                 if (!resp.isSuccessful) {
                     val text = try { resp.body?.string() ?: "" } catch (e: Exception) { "" }
                     val json = try { JSONObject(text) } catch (e: Exception) { JSONObject() }
-                    throw ApiError(resp.code, json.optString("error").ifEmpty { "HTTP ${resp.code}" })
+                    throw ApiException(resp.code, json.optString("code").ifEmpty { null }, json, json.optString("error").ifEmpty { "HTTP ${resp.code}" })
                 }
             }
         }
@@ -333,7 +374,7 @@ class Api(private val store: Store) {
 
         /** Human-friendly message for thrown exceptions. */
         fun describeError(e: Exception): String = when (e) {
-            is ApiError -> e.message ?: "Server error"
+            is ApiException -> e.message ?: "Server error"
             else -> "Can't reach the server — check the address and your network"
         }
     }

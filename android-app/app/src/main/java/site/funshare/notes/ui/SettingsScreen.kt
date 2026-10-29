@@ -279,6 +279,13 @@ fun SettingsScreen(vm: AppViewModel) {
         SectionLabel("Data")
         GroupCard {
             SettingsRow(
+                icon = Icons.Filled.Delete,
+                title = "Trash",
+                subtitle = "Restore or permanently delete notes",
+                onClick = { vm.navigate(site.funshare.notes.Screen.Trash); vm.loadTrash() },
+            )
+            InsetDivider()
+            SettingsRow(
                 icon = Icons.Filled.Download,
                 title = "Export backup (JSON)",
                 subtitle = "All synced notes as one file",

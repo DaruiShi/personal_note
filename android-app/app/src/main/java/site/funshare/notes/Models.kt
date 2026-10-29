@@ -13,6 +13,10 @@ data class Note(
     val updatedAt: Long,
     /** Folder this note lives in (server folder id); null = unfiled. */
     val folderId: String? = null,
+    /** Concurrency token: the server rejects saves carrying a stale rev. */
+    val rev: Int = 0,
+    /** Non-null while the note sits in the server-side trash. */
+    val deletedAt: Long? = null,
 ) {
     val isLocal: Boolean get() = id.startsWith("local:")
 
@@ -25,6 +29,7 @@ data class Note(
         .put("createdAt", createdAt)
         .put("updatedAt", updatedAt)
         .put("folderId", folderId ?: JSONObject.NULL)
+        .put("rev", rev)
 
     companion object {
         fun fromJson(o: JSONObject): Note = Note(
@@ -39,6 +44,8 @@ data class Note(
             createdAt = o.optLong("createdAt"),
             updatedAt = o.optLong("updatedAt"),
             folderId = o.optString("folderId").ifEmpty { null },
+            rev = o.optInt("rev", 0),
+            deletedAt = if (o.has("deletedAt") && !o.isNull("deletedAt")) o.optLong("deletedAt") else null,
         )
     }
 }

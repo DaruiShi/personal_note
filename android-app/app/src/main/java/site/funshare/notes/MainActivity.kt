@@ -31,6 +31,7 @@ import site.funshare.notes.ui.FunshareTheme
 import site.funshare.notes.ui.LoginScreen
 import site.funshare.notes.ui.NotesScreen
 import site.funshare.notes.ui.SettingsScreen
+import site.funshare.notes.ui.TrashScreen
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -81,6 +82,7 @@ fun AppRoot(vm: AppViewModel) {
                         Screen.Edit -> EditScreen(vm)
                         Screen.Settings -> SettingsScreen(vm)
                         Screen.Admin -> AdminScreen(vm)
+                        Screen.Trash -> TrashScreen(vm)
                     }
                 }
                 if (vm.booting) {

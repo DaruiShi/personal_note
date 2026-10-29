@@ -68,6 +68,7 @@
           <span class="admin-badge hidden" id="admin-badge">Admin</span>
         </button>
         <div class="side-foot-row">
+          <button class="link-btn" id="trash-btn" title="Open trash"><span class="ic" id="trash-ic"></span>Trash <span class="note-count" id="trash-count"></span></button>
           <button class="link-btn" id="export-btn" title="Download your notes as JSON"><span class="ic" id="export-ic"></span>Export backup</button>
           <span class="note-count" id="note-count"></span>
         </div>
@@ -100,6 +101,7 @@
                 <button id="font-plus" type="button" aria-label="Larger preview text" title="Larger">+</button>
               </div>
               <button class="icon-btn" id="share-btn" title="Share note" aria-label="Share note"></button>
+              <button class="icon-btn" id="history-btn" title="Version history" aria-label="Version history"></button>
               <button class="icon-btn danger" id="delete-btn" title="Delete note" aria-label="Delete note"></button>
             </div>
           </div>
@@ -200,7 +202,51 @@
     </div>
   </div>
 
-  <!-- ======================= confirm modal ======================= -->
+  <!-- ======================= conflict modal ======================= -->
+  <div class="modal-backdrop hidden" id="conflict-modal">
+    <div class="modal" role="dialog" aria-modal="true">
+      <h3>This note changed elsewhere</h3>
+      <p id="conflict-text"></p>
+      <div class="modal-actions">
+        <button class="btn" id="conflict-theirs" type="button">Keep the other version</button>
+        <button class="btn" id="conflict-both" type="button">Keep both</button>
+        <button class="btn primary" id="conflict-mine" type="button">Keep my version</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ======================= trash modal ======================= -->
+  <div class="modal-backdrop hidden" id="trash-modal">
+    <div class="modal wide" role="dialog" aria-modal="true">
+      <h3>Trash</h3>
+      <p class="modal-sub">Deleted notes are kept for <span id="trash-retention">30</span> days, then removed permanently.</p>
+      <div id="trash-list"></div>
+      <div class="modal-actions">
+        <button class="btn danger-outline hidden" id="trash-empty" type="button">Empty trash</button>
+        <button class="btn" id="trash-close" type="button">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ======================= history modal ======================= -->
+  <div class="modal-backdrop hidden" id="history-modal">
+    <div class="modal wide" role="dialog" aria-modal="true">
+      <h3>Version history</h3>
+      <div id="history-list"></div>
+      <div id="history-detail" class="hidden">
+        <div class="preview history-preview" id="history-content"></div>
+        <div class="modal-actions">
+          <button class="btn" id="history-back" type="button">Back</button>
+          <button class="btn primary" id="history-restore" type="button">Restore this version</button>
+        </div>
+      </div>
+      <div class="modal-actions" id="history-close-row">
+        <button class="btn" id="history-close" type="button">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ======================= confirm modal (last: always on top) ======================= -->
   <div class="modal-backdrop hidden" id="modal">
     <div class="modal" role="dialog" aria-modal="true">
       <h3 id="modal-title"></h3>
@@ -212,6 +258,6 @@
     </div>
   </div>
 
-  <div class="toast" id="toast" role="status"></div>
+  <div class="toast" id="toast" role="status"><span id="toast-msg"></span><button type="button" class="toast-action hidden" id="toast-action"></button></div>
 </body>
 </html>

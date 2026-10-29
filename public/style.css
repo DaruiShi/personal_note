@@ -901,3 +901,69 @@ input, textarea { font: inherit; color: inherit; }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
 }
+
+/* ============================================================ trash / history / conflict */
+
+.toast.show { pointer-events: auto; }
+.toast { display: flex; align-items: center; gap: 12px; }
+.toast-action {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 2px 0;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+.modal-sub { margin: 0 0 14px; color: var(--muted); font-size: 12.5px; }
+
+.trash-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 4px;
+  border-bottom: 1px solid var(--line);
+}
+.trash-row:last-child { border-bottom: none; }
+.trash-meta { flex: 1; min-width: 0; }
+.trash-title {
+  display: block;
+  font-size: 13.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.trash-sub { display: block; font-size: 12px; color: var(--muted); margin-top: 2px; }
+.trash-actions { display: flex; gap: 6px; flex-shrink: 0; }
+#trash-list { max-height: 46dvh; overflow-y: auto; margin-bottom: 14px; }
+
+.history-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--line);
+  padding: 10px 4px;
+  font-size: 13px;
+  cursor: pointer;
+  color: var(--text);
+  text-align: left;
+}
+.history-row:hover { background: var(--accent-soft); }
+.history-row:last-child { border-bottom: none; }
+.history-when { font-weight: 600; }
+.history-size { color: var(--muted); }
+#history-list { max-height: 46dvh; overflow-y: auto; }
+.history-preview {
+  max-height: 40dvh;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-bottom: 14px;
+  font-size: 14px;
+}
