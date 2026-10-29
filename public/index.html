@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Notes</title>
+  <meta name="description" content="Self-hosted personal notes">
+  <meta name="theme-color" content="#6366f1" id="meta-theme-color">
+  <link rel="icon" href="/icon.svg">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <noscript><div class="noscript">This app needs JavaScript to run.</div></noscript>
+
+  <!-- ======================= auth (login / first-run setup) ======================= -->
+  <div id="view-auth" class="auth-wrap hidden">
+    <div class="auth-card">
+      <div class="auth-logo" id="auth-logo"></div>
+      <h1>Notes</h1>
+      <p class="auth-sub" id="auth-sub"></p>
+      <form id="auth-form" autocomplete="off">
+        <input type="text" id="auth-username" placeholder="Username" autocomplete="username" required>
+        <input type="password" id="auth-password" placeholder="Password" autocomplete="current-password" required>
+        <input type="password" id="auth-password2" class="hidden" placeholder="Confirm password" autocomplete="new-password">
+        <button type="submit" class="btn primary" id="auth-submit">Sign in</button>
+        <p class="auth-error" id="auth-error" role="alert"></p>
+        <button type="button" class="auth-alt hidden" id="auth-alt"></button>
+      </form>
+    </div>
+    <p class="auth-footer">Self-hosted &middot; your data stays on your server</p>
+  </div>
+
+  <!-- ======================= main app ======================= -->
+  <div id="app" class="app hidden">
+    <aside class="sidebar" id="sidebar">
+      <div class="side-head">
+        <div class="brand"><span class="logo" id="brand-icon"></span><span>Notes</span></div>
+        <div class="side-head-actions">
+          <button class="icon-btn" id="theme-btn" title="Toggle theme" aria-label="Toggle theme"></button>
+          <button class="icon-btn" id="logout-btn" title="Sign out" aria-label="Sign out"></button>
+        </div>
+      </div>
+
+      <button class="new-note-btn" id="new-note-btn"><span class="ic" id="new-note-ic"></span>New note</button>
+
+      <div class="search-box">
+        <span id="search-icon"></span>
+        <input id="search-input" type="text" placeholder="Search notes&hellip;" autocomplete="off" spellcheck="false">
+      </div>
+
+      <div class="folders-head">
+        <span class="folders-label">Folders</span>
+        <button class="icon-btn" id="add-folder-btn" title="New folder" aria-label="New folder"></button>
+      </div>
+      <div id="folder-list" class="folder-list"></div>
+
+      <div id="tag-filter" class="tag-filter hidden"></div>
+      <div id="folder-filter" class="tag-filter hidden"></div>
+
+      <div class="note-list" id="note-list"></div>
+
+      <div class="side-foot">
+        <button class="user-chip" id="user-chip" title="Account settings" type="button">
+          <span class="avatar" id="user-avatar">?</span>
+          <span class="user-name" id="user-name"></span>
+          <span class="admin-badge hidden" id="admin-badge">Admin</span>
+        </button>
+        <div class="side-foot-row">
+          <button class="link-btn" id="export-btn" title="Download your notes as JSON"><span class="ic" id="export-ic"></span>Export backup</button>
+          <span class="note-count" id="note-count"></span>
+        </div>
+      </div>
+    </aside>
+    <div class="sidebar-backdrop hidden" id="sidebar-backdrop"></div>
+
+    <main class="main">
+      <div class="empty-state hidden" id="empty-state">
+        <div class="empty-icon" id="empty-ic"></div>
+        <h2>No notes yet</h2>
+        <p>Markdown-supported notes, searchable and private.</p>
+        <button class="btn primary" id="empty-create-btn">Create your first note</button>
+      </div>
+
+      <div class="editor hidden" id="editor">
+        <div class="editor-header">
+          <div class="editor-top">
+            <button class="icon-btn mobile-only" id="menu-btn" title="Menu" aria-label="Open notes list"></button>
+            <input id="note-title" class="note-title-input" placeholder="Untitled" maxlength="500" autocomplete="off">
+            <div class="editor-actions">
+              <button class="icon-btn" id="pin-btn" title="Pin note" aria-label="Pin note"></button>
+              <div class="segmented">
+                <button id="tab-write" class="active" type="button">Write</button>
+                <button id="tab-preview" type="button">Preview</button>
+              </div>
+              <div class="font-ctl hidden" id="font-ctl" role="group" aria-label="Preview font size">
+                <button id="font-minus" type="button" aria-label="Smaller preview text" title="Smaller">&minus;</button>
+                <button id="font-reset" type="button" aria-label="Reset preview text size" title="Reset preview text size">100%</button>
+                <button id="font-plus" type="button" aria-label="Larger preview text" title="Larger">+</button>
+              </div>
+              <button class="icon-btn" id="share-btn" title="Share note" aria-label="Share note"></button>
+              <button class="icon-btn danger" id="delete-btn" title="Delete note" aria-label="Delete note"></button>
+            </div>
+          </div>
+          <div class="tag-editor">
+            <select id="folder-select" class="folder-select" title="Folder" aria-label="Folder"></select>
+            <div id="tag-chips" class="tag-chips"></div>
+            <input id="tag-input" placeholder="Add tag&hellip;" autocomplete="off">
+          </div>
+          <div class="editor-toolbar" id="editor-toolbar"></div>
+        </div>
+
+        <div class="editor-body">
+          <textarea id="note-content" placeholder="Start writing&hellip; Markdown is supported." spellcheck="true"></textarea>
+          <div id="preview" class="preview hidden"></div>
+        </div>
+
+        <div class="status-bar">
+          <span id="save-status"><span class="status-dot"></span><span class="status-text"></span></span>
+          <span id="word-count"></span>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- ======================= account modal ======================= -->
+  <div class="modal-backdrop hidden" id="account-modal">
+    <div class="modal" role="dialog" aria-modal="true">
+      <h3>Account</h3>
+      <div class="account-user" id="acct-user"></div>
+      <form id="pw-form">
+        <h4>Change password</h4>
+        <input type="password" id="pw-current" placeholder="Current password" autocomplete="current-password">
+        <input type="password" id="pw-new" placeholder="New password" autocomplete="new-password">
+        <input type="password" id="pw-new2" placeholder="Confirm new password" autocomplete="new-password">
+        <button type="submit" class="btn primary" id="pw-submit">Update password</button>
+        <p class="form-msg" id="pw-msg"></p>
+      </form>
+      <h4>Sessions</h4>
+      <button class="btn" id="logout-all-btn" type="button">Sign out on all devices</button>
+      <h4>Danger zone</h4>
+      <div id="delete-acct-row">
+        <button class="btn danger-outline" id="delete-acct-btn" type="button">Delete this account&hellip;</button>
+      </div>
+      <form id="delete-acct-form" class="hidden">
+        <input type="password" id="delete-acct-pw" placeholder="Password" autocomplete="current-password">
+        <div class="modal-actions">
+          <button type="button" class="btn" id="delete-acct-cancel">Cancel</button>
+          <button type="submit" class="btn danger">Delete permanently</button>
+        </div>
+        <p class="form-msg" id="delete-acct-msg"></p>
+      </form>
+      <div id="manage-users-row" class="hidden">
+        <h4>Administration</h4>
+        <button class="btn" id="manage-users-btn" type="button">Manage users</button>
+      </div>
+      <div class="modal-actions"><button class="btn" id="account-close" type="button">Close</button></div>
+    </div>
+  </div>
+
+  <!-- ======================= users modal (admin) ======================= -->
+  <div class="modal-backdrop hidden" id="users-modal">
+    <div class="modal wide" role="dialog" aria-modal="true">
+      <h3>Users</h3>
+      <label class="switch-row">
+        <span>Allow new registrations</span>
+        <span class="switch"><input type="checkbox" id="reg-toggle"><span class="track"></span></span>
+      </label>
+      <div class="users-list" id="users-list"></div>
+      <div class="modal-actions"><button class="btn" id="users-close" type="button">Close</button></div>
+    </div>
+  </div>
+
+  <!-- ======================= public share view ======================= -->
+  <div id="view-share" class="share-wrap hidden">
+    <div class="share-brand"><span class="logo" id="share-logo"></span>Notes</div>
+    <article class="share-card">
+      <h1 id="share-title"></h1>
+      <div class="share-meta" id="share-meta"></div>
+      <div class="preview" id="share-content"></div>
+      <p class="share-error hidden" id="share-error" role="alert"></p>
+    </article>
+  </div>
+
+  <!-- ======================= share modal ======================= -->
+  <div class="modal-backdrop hidden" id="share-modal">
+    <div class="modal" role="dialog" aria-modal="true">
+      <h3>Share note</h3>
+      <p id="share-expl"></p>
+      <div class="share-row hidden" id="share-row">
+        <input type="text" id="share-link" readonly>
+        <button class="btn" id="share-copy" type="button">Copy</button>
+      </div>
+      <div class="modal-actions">
+        <button class="btn danger-outline hidden" id="share-revoke" type="button">Revoke link</button>
+        <button class="btn primary" id="share-create" type="button">Create link</button>
+        <button class="btn" id="share-close" type="button">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ======================= confirm modal ======================= -->
+  <div class="modal-backdrop hidden" id="modal">
+    <div class="modal" role="dialog" aria-modal="true">
+      <h3 id="modal-title"></h3>
+      <p id="modal-text"></p>
+      <div class="modal-actions">
+        <button class="btn" id="modal-cancel">Cancel</button>
+        <button class="btn danger" id="modal-confirm">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" role="status"></div>
+</body>
+</html>

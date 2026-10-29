@@ -1,0 +1,25 @@
+# runtime data (password hash, sessions, notes)
+data/
+
+# secrets — never publish the release signing key
+android-app/keystore/
+android-app/local.properties
+.env
+.env.*
+
+# release artifacts (188 MB of APKs; distribute via releases instead)
+*.apk
+
+# android / gradle build output
+.gradle/
+build/
+app/build/
+
+# node
+node_modules/
+npm-debug.log*
+
+# os / editor noise
+.DS_Store
+Thumbs.db
+*.tmp

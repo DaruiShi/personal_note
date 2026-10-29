@@ -1,0 +1,44 @@
+### 2026/10/18
+- [x] 梳理Compassionate AI for DSS的story（下午）
+- [x] 修改完Compassionate AI for DSS的introduction（晚上）
+- [x] 修改完Compassionate AI for DSS的Evaluation & Results部分（晚上）
+
+### 2026/10/18
+- [ ] 修改完Compassionate AI for DSS的Discussion（上午）
+- [x] 修改完Compassionate AI for DSS的Conclusion部分（下午）
+- [ ] 找到需要添加的literature review的papers，发给皓晨（晚上）
+
+### 2026/10/19
+- [ ] 整合完Compassionate AI for DSS的完整稿（下午）
+
+---
+### 2026/10/16
+- [ ] 梳理Compassionate AI for DSS的story（上午）
+- [ ] 修改完Compassionate AI for DSS的introduction（下午）
+- [ ] 修改完Compassionate AI for DSS的Evaluation & Results部分（晚上）
+- [x] 打球
+
+### 2026/10/15
+- [ ] 梳理Compassionate AI for DSS的story（上午）
+- [x] 去龙岗妇幼看医生（中午）
+- [ ] 修改完Compassionate AI for DSS的introduction（下午）
+- [ ] 修改完Compassionate AI for DSS的Evaluation & Results部分（晚上）
+- [x] 搭建汇报Credemo初步结果的框架（晚上）
+
+### 2026/10/14
+- [ ] 梳理Compassionate AI for DSS的story（上午）
+- [ ] 修改完Compassionate AI for DSS的introduction（下午）
+- [x] 和赵老师讨论初步的实证研究发现（晚饭）
+- [x] 梳理social bot and platform operations的结果结构（晚上）
+- [ ] 修改完Compassionate AI for DSS的Evaluation & Results部分（晚上）
+- [ ] 搭建汇报Credemo初步结果的框架（晚上）
+
+### 2026/10/13
+- [x] 和九牧iHR谈合作*（10：00）*
+- [x] 讨论social bot & platform operations的实证部分安排（上午）
+- [x] 约赵老师时间讨论LLM competition的初步结果（中午）
+- [x] 梳理Compassionate AI for DSS的story（下午）
+- [ ] 修改完Compassionate AI for DSS的introduction（下午）
+- [x] 还书（下午）
+- [x] 修改完Compassionate AI for DSS的Evaluation & Results部分（晚上）
+- [x] 搭建汇报Credemo初步结果的框架（晚上）

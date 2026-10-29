@@ -1,0 +1,27 @@
+[Unit]
+Description=Personal Notes web app
+After=network.target
+
+[Service]
+Type=simple
+User=notes
+Group=notes
+WorkingDirectory=/opt/notes
+ExecStart=/usr/bin/node server.js
+Environment=PORT=3000
+Environment=HOST=127.0.0.1
+# Set to 1 when behind a reverse proxy (nginx/Caddy) so login rate limiting
+# sees real client IPs from X-Forwarded-For:
+#Environment=TRUST_PROXY=1
+Restart=on-failure
+RestartSec=5
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/notes/data
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

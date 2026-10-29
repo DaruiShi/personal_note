@@ -1,0 +1,10 @@
+# Caddy reverse proxy with automatic HTTPS.
+# 1) Install Caddy:  https://caddyserver.com/docs/install
+# 2) Point your domain's DNS A record at this server.
+# 3) Save this file as /etc/caddy/Caddyfile (edit the domain), then:
+#      sudo systemctl reload caddy
+
+notes.example.com {
+    encode zstd gzip
+    reverse_proxy 127.0.0.1:3000
+}
