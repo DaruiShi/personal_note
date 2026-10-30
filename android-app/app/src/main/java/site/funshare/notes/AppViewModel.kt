@@ -99,6 +99,11 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
     var editContent by mutableStateOf("")
     var editTags by mutableStateOf(listOf<String>())
     var editPinned by mutableStateOf(false)
+    /** Timeline items being edited (only when editIsTimeline). */
+    var editTimeline by mutableStateOf<List<TimelineItem>>(emptyList())
+        internal set
+    var editIsTimeline by mutableStateOf(false)
+        internal set
     var editStatus by mutableStateOf<EditStatus>(EditStatus.Idle)
         private set
     /** Non-null while a save hit a 409 and the user must pick a version. */
@@ -123,6 +128,10 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
     /* share state (from /api/session) */
     /** Server serves /share/<token>/qr.svg; false on servers without the QR module. */
     var shareQrEnabled by mutableStateOf(false)
+        private set
+
+    /** Server has an LLM config for timeline Paste & parse. */
+    var timelineParseEnabled by mutableStateOf(false)
         private set
 
     /* wikilink index over the live notes (rebuilt on list changes,
@@ -529,7 +538,11 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
         val pending = notes.filter { it.isLocal }
         for (n in pending) {
             try {
-                val created = api.createNote(n.title, n.content, n.tags, n.pinned, n.folderId)
+                val created = if (n.isTimeline) {
+                    api.createTimelineNote(n.title, n.timeline ?: emptyList(), n.tags, n.pinned, n.folderId)
+                } else {
+                    api.createNote(n.title, n.content, n.tags, n.pinned, n.folderId)
+                }
                 notes = notes.map { if (it.id == n.id) created else it }
                 if (editingId == n.id) {
                     editingId = created.id
@@ -595,19 +608,22 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
         val note = if (id == "new") null else notes.firstOrNull { it.id == id }
         editingId = id
         conflict = null
-        editStartInPreview = note != null && !startInEdit
+        editStartInPreview = note != null && !startInEdit && !note.isTimeline
         pendingDraftFolderId = null
         editTitle = note?.title ?: ""
         editContent = note?.content ?: ""
         editTags = note?.tags ?: emptyList()
         editPinned = note?.pinned ?: false
+        editIsTimeline = note?.isTimeline == true
+        editTimeline = note?.timeline ?: emptyList()
         lastSavedSnapshot = editorSnapshot()
         editStatus = if (note == null) EditStatus.Idle else EditStatus.Saved(note.updatedAt)
         navigate(Screen.Edit)
     }
 
     private fun editorSnapshot(): String =
-        "${editTitle}\u0000${editContent}\u0000${editTags.joinToString("\u0001")}\u0000$editPinned"
+        "${editTitle}\u0000${editContent}\u0000${editTags.joinToString("\u0001")}\u0000$editPinned" +
+            (if (editIsTimeline) "\u0000" + editTimeline.joinToString("\u0002") { "${it.id}|${it.date}|${it.done}|${it.text}" } else "")
 
     private fun editorDirty(): Boolean = editorSnapshot() != lastSavedSnapshot
 
@@ -640,6 +656,95 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
         val flipped = site.funshare.notes.ui.flipTaskMarker(editContent, taskIndex) ?: return
         editContent = flipped
         onEditorChanged()
+    }
+
+    /* ----------------------------------------------- timeline notes */
+
+    /** Create an empty timeline note and open it in the timeline editor. */
+    fun newTimelineNote() {
+        viewModelScope.launch {
+            autosaveNow()
+            try {
+                val created = api.createTimelineNote(
+                    "Timeline", emptyList(), emptyList(), false,
+                    folderId = selectedFolderId?.takeIf { it.isNotEmpty() },
+                )
+                notes = sortNotes(listOf(created) + notes)
+                updateLinkIndex(created)
+                store.cachedNotes = notes
+                openEditor(created.id)
+            } catch (e: Exception) {
+                postMessage("Couldn't create timeline — ${Api.describeError(e)}")
+            }
+        }
+    }
+
+    private fun tlMutate(transform: (List<TimelineItem>) -> List<TimelineItem>) {
+        if (!editIsTimeline) return
+        editTimeline = transform(editTimeline)
+        onEditorChanged()
+    }
+
+    fun tlAdd(date: String, text: String, start: String? = null, end: String? = null) =
+        tlMutate { NotesTimeline.insertItem(it, NotesTimeline.makeItem(date, text, start = start, end = end)) }
+
+    fun tlUpdateText(id: String, text: String) =
+        tlMutate { NotesTimeline.updateText(it, id, text) }
+
+    /** Edit dialog: text plus times; re-slots only when the times changed. */
+    fun tlUpdateItem(id: String, text: String, start: String?, end: String?) {
+        val item = editTimeline.firstOrNull { it.id == id } ?: return
+        tlMutate { items ->
+            var next = NotesTimeline.updateText(items, id, text)
+            if (item.start != start || item.end != end) {
+                next = NotesTimeline.updateItemTime(next, id, start, end)
+            }
+            next
+        }
+    }
+
+    fun tlToggleDone(id: String) =
+        tlMutate { NotesTimeline.toggleDone(it, id) }
+
+    fun tlMove(id: String, date: String) =
+        tlMutate { NotesTimeline.move(it, id, date) }
+
+    /** Drag-and-drop within a date: drop before [beforeId], or last when null. */
+    fun tlReorder(id: String, beforeId: String?) =
+        tlMutate { NotesTimeline.moveWithinDate(it, id, beforeId) }
+
+    fun tlDelete(id: String) =
+        tlMutate { NotesTimeline.remove(it, id) }
+
+    /** Merge confirmed parse results into the note (no duplicate rows). */
+    fun tlMergeParsed(incoming: List<NotesTimeline.Parsed>) =
+        tlMutate { NotesTimeline.mergeParsed(it, incoming) }
+
+    /**
+     * Parse a paste for the editor. Uses the server's LLM when configured
+     * and falls back to the local parser otherwise or on failure — the
+     * pasted text is never lost. A rate limit returns no items, just the
+     * notice, so the dialog stays open.
+     */
+    suspend fun parsePaste(text: String): Pair<List<NotesTimeline.Parsed>, String?> {
+        val today = NotesLinks.localDateKey(java.util.Date())
+        if (!timelineParseEnabled) {
+            return NotesTimeline.parseFallback(text, today, NotesLinks::addDays) to null
+        }
+        return try {
+            val (items, _) = api.parseTimeline(text, today)
+            items to null
+        } catch (e: ApiException) {
+            if (e.code == "too_many_requests" || e.code == "busy") {
+                emptyList<NotesTimeline.Parsed>() to (e.message ?: "The parser is busy — try again later")
+            } else {
+                NotesTimeline.parseFallback(text, today, NotesLinks::addDays) to
+                    "Couldn't reach the AI service — used basic parsing (${e.message})"
+            }
+        } catch (e: Exception) {
+            NotesTimeline.parseFallback(text, today, NotesLinks::addDays) to
+                "Couldn't reach the AI service — used basic parsing"
+        }
     }
 
     /** The live OkHttp client (shares cookies + trust-all TLS). */
@@ -732,6 +837,7 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
     /** Cache the share-relevant parts of /api/session. */
     private fun applySessionFeatures(s: SessionInfo) {
         shareQrEnabled = s.featuresQr
+        timelineParseEnabled = s.featuresTimelineParse
     }
 
     private fun saveEditor(id: String) {
@@ -740,7 +846,36 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
             editStatus = EditStatus.Saving
             val snap = editorSnapshot()
             try {
-                if (id == "new" || id.startsWith("local:")) {
+                if (editIsTimeline) {
+                    if (id == "new" || id.startsWith("local:")) {
+                        val draft = notes.firstOrNull { it.id == id }
+                        val created = api.createTimelineNote(
+                            editTitle, editTimeline, editTags, editPinned,
+                            folderId = pendingDraftFolderId ?: draft?.folderId,
+                        )
+                        editingId = created.id
+                        pendingDraftFolderId = null
+                        if (backStack.lastOrNull() == Screen.Edit) replaceTop(Screen.Edit)
+                        notes = sortNotes(notes.filterNot { it.id == id } + created)
+                        rebuildLinkIndex() // the old draft id left the list
+                    } else {
+                        val current = notes.firstOrNull { it.id == id }
+                        val updated = api.updateTimelineNote(
+                            id, editTitle, editTimeline, editTags, editPinned,
+                            folderId = pendingDraftFolderId ?: current?.folderId,
+                            rev = current?.rev?.takeIf { it > 0 },
+                        )
+                        pendingDraftFolderId = null
+                        notes = sortNotes(notes.map { if (it.id == id) updated else it })
+                        updateLinkIndex(updated) // incremental: no full rescan per save
+                    }
+                    lastSavedSnapshot = snap
+                    // The server normalises ids/order; adopt its items and
+                    // recompute the dirty snapshot so the editor settles.
+                    val saved = notes.firstOrNull { it.id == editingId }
+                    editTimeline = saved?.timeline ?: editTimeline
+                    lastSavedSnapshot = editorSnapshot()
+                } else if (id == "new" || id.startsWith("local:")) {
                     val draft = notes.firstOrNull { it.id == id }
                     val created = api.createNote(
                         editTitle, editContent, editTags, editPinned,
@@ -762,7 +897,10 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
                     notes = sortNotes(notes.map { if (it.id == id) updated else it })
                     updateLinkIndex(updated) // incremental: no full rescan per save
                 }
-                lastSavedSnapshot = snap
+                // The timeline branch already recomputed its snapshot after
+                // adopting the server-normalised items (ids may change), so
+                // only the markdown paths take the pre-save snap here.
+                if (!editIsTimeline) lastSavedSnapshot = snap
                 editStatus = EditStatus.Saved(System.currentTimeMillis())
                 store.cachedNotes = notes
                 store.pendingNotes = notes.filter { it.isLocal }
@@ -795,6 +933,8 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
         val draft = Note(
             id = id, title = editTitle, content = editContent,
             tags = editTags, pinned = editPinned, createdAt = now, updatedAt = now,
+            kind = if (editIsTimeline) "timeline" else null,
+            timeline = if (editIsTimeline) editTimeline else null,
         )
         editingId = id
         if (originalId == "new" && backStack.lastOrNull() == Screen.Edit) replaceTop(Screen.Edit)
@@ -829,6 +969,8 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
             editContent = server.content
             editTags = server.tags
             editPinned = server.pinned
+            editIsTimeline = server.isTimeline
+            editTimeline = server.timeline ?: emptyList()
             lastSavedSnapshot = editorSnapshot()
             editStatus = EditStatus.Saved(server.updatedAt)
         }
@@ -844,17 +986,25 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
         if (editingId != c.noteId) return
         viewModelScope.launch {
             editStatus = EditStatus.Saving
-            val snap = editorSnapshot()
             try {
-                val updated = api.updateNote(
-                    c.noteId, editTitle, editContent, editTags, editPinned,
-                    folderId = pendingDraftFolderId ?: c.server.folderId,
-                    rev = c.server.rev,
-                )
+                val updated = if (editIsTimeline) {
+                    api.updateTimelineNote(
+                        c.noteId, editTitle, editTimeline, editTags, editPinned,
+                        folderId = pendingDraftFolderId ?: c.server.folderId,
+                        rev = c.server.rev,
+                    )
+                } else {
+                    api.updateNote(
+                        c.noteId, editTitle, editContent, editTags, editPinned,
+                        folderId = pendingDraftFolderId ?: c.server.folderId,
+                        rev = c.server.rev,
+                    )
+                }
                 pendingDraftFolderId = null
                 notes = sortNotes(notes.map { if (it.id == c.noteId) updated else it })
                 updateLinkIndex(updated)
-                lastSavedSnapshot = snap
+                if (editIsTimeline) editTimeline = updated.timeline ?: editTimeline
+                lastSavedSnapshot = editorSnapshot()
                 editStatus = EditStatus.Saved(System.currentTimeMillis())
                 store.cachedNotes = notes
             } catch (e: Exception) {

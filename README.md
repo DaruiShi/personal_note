@@ -64,19 +64,23 @@ browser (desktop or phone), and keep your notes private behind a login.
   open registration
 - **Timeline notes** — a second note kind organised by date: it opens on
   today, scrolls horizontally between dates, and holds a list of items per
-  date that can be added, edited, moved, and deleted in place. **Paste &
-  parse** turns pasted text into dated items (via MiniMax when configured,
-  otherwise a basic local parser) for you to confirm.
+  date that can be added, edited, moved, checked off, and deleted in place.
+  Items can carry an optional HH:MM-HH:MM time range (with quick
+  Morning / Noon / Afternoon / Evening presets); within a date they sort
+  by time (untimed last) and you can drag rows into a manual order.
+  **Paste & parse** turns pasted text into dated, timed items (via MiniMax
+  when configured, otherwise a basic local parser) for you to confirm.
 
 ### Note types
 
 Notes are either plain **markdown** notes (the default; `kind` absent) or
 **timeline** notes (`kind: "timeline"`, items in `note.timeline.items`). A
 timeline's markdown `content` is a read-only mirror the server derives from
-its items — every save regenerates it, so sharing, trash, export, and the
-Android app (which shows the mirror read-only and is refused with a clear
-message if it tries to write) all keep working. Up to 5000 items per note,
-each with plain text up to 4000 characters on a `YYYY-MM-DD` date.
+its items — every save regenerates it, so sharing, trash, and export all
+keep working. The Android app (v1.20+) edits timelines natively; older
+Android builds see the mirror and are refused with a clear message if they
+try to write. Up to 5000 items per note, each with plain text up to 4000
+characters on a `YYYY-MM-DD` date.
 
 ### Wikilinks and daily notes
 
@@ -285,7 +289,7 @@ test/                     node:test suite (npm test)
 ## Android app
 
 A native Android client lives in [`android-app/`](android-app/README.md) —
-the signed APK is `android-app/FunshareNotes-v1.19.apk`. It connects to this
+the signed APK is `android-app/FunshareNotes-v1.24.apk`. It connects to this
 server's JSON API with the same accounts and notes as the website, and its
 server address is configurable on the sign-in screen.
 

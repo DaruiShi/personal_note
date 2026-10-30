@@ -34,7 +34,7 @@ test('create: echo has ids, sorted dates, exact markdown mirror', async () => {
     assert.deepEqual(note.timeline.items.map((i) => i.date), ['2026-10-29', '2026-10-30']);
     assert.equal(note.timeline.items[0].text, 'first day');
     // the mirror is the exact contract — assert the whole string
-    assert.equal(note.content, '## 2026-10-29\n- first day\n\n## 2026-10-30\n- second day');
+    assert.equal(note.content, '## 2026-10-29\n- [ ] first day\n\n## 2026-10-30\n- [ ] second day');
     // GET /api/notes includes kind + timeline
     const list = await req(server.base, cookie, 'GET', '/api/notes');
     const mine = list.data.notes.find((n) => n.id === note.id);
@@ -86,7 +86,7 @@ test('PUT without timeline -> 409 code timeline (Android guard), nothing changes
     assert.equal(r.data.code, 'timeline');
     assert.equal(r.data.error, 'This timeline note can only be edited in the web app');
     const after = await req(server.base, cookie, 'GET', `/api/notes/${note.id}`);
-    assert.equal(after.data.note.content, '## 2026-10-30\n- kept');
+    assert.equal(after.data.note.content, '## 2026-10-30\n- [ ] kept');
     assert.equal(after.data.note.rev, note.rev);
     // and no history entry was written
     const h = await req(server.base, cookie, 'GET', `/api/notes/${note.id}/history`);
@@ -129,7 +129,7 @@ test('validation: invalid date, non-string text, too many items, invalid kind', 
       timeline: { items: [item('2026-10-30', 'one'), item('2026-10-31', 'two')] },
     });
     assert.equal(put.status, 200);
-    assert.equal(put.data.note.content, '## 2026-10-30\n- one\n\n## 2026-10-31\n- two');
+    assert.equal(put.data.note.content, '## 2026-10-30\n- [ ] one\n\n## 2026-10-31\n- [ ] two');
   } finally {
     await server.stop();
   }
@@ -161,7 +161,7 @@ test('history: snapshots kind + timeline and restores items, not just the mirror
     assert.equal(restore.status, 200);
     assert.equal(restore.data.note.timeline.items.length, 1);
     assert.equal(restore.data.note.timeline.items[0].text, 'a');
-    assert.equal(restore.data.note.content, '## 2026-10-29\n- a');
+    assert.equal(restore.data.note.content, '## 2026-10-29\n- [ ] a');
     assert.equal(restore.data.note.kind, 'timeline');
   } finally {
     await server.stop();
@@ -196,12 +196,117 @@ test('trash + restore + share keep working through the mirror', async () => {
   }
 });
 
+test('time ranges order items within a date and ride through the mirror', async () => {
+  const server = await startServer();
+  try {
+    const cookie = await register(server.base, 'tltime');
+    // untimed first in the payload; the comparator must re-order by start,
+    // untimed last, and explicit order must win over time
+    const r = await req(server.base, cookie, 'POST', '/api/notes', {
+      title: 'day plan', kind: 'timeline',
+      timeline: { items: [
+        item('2026-10-30', 'untimed later'),
+        { ...item('2026-10-30', 'afternoon block'), start: '14:00', end: '16:00' },
+        { ...item('2026-10-30', 'morning run'), start: '07:30' },
+        { ...item('2026-10-30', 'pinned first'), order: 0 },
+      ] },
+      tags: [], pinned: false,
+    });
+    assert.equal(r.status, 201);
+    const items = r.data.note.timeline.items;
+    assert.deepEqual(items.map((i) => i.text), ['pinned first', 'morning run', 'afternoon block', 'untimed later']);
+    assert.deepEqual(items.map((i) => [i.start, i.end]), [
+      [null, null], ['07:30', null], ['14:00', '16:00'], [null, null],
+    ]);
+    assert.equal(items[0].order, 0);
+    assert.equal(r.data.note.content,
+      '## 2026-10-30\n' +
+      '- [ ] pinned first\n' +
+      '- [ ] 07:30 morning run\n' +
+      '- [ ] 14:00-16:00 afternoon block\n' +
+      '- [ ] untimed later');
+
+    // drag-style rewrite: explicit order overrides time
+    const reordered = items.map((i) => ({ ...i }));
+    reordered.sort((a, b) => (a.text === 'untimed later' ? -1 : b.text === 'untimed later' ? 1 : 0));
+    const put = await req(server.base, cookie, 'PUT', `/api/notes/${r.data.note.id}`, {
+      title: 'day plan', kind: 'timeline', rev: r.data.note.rev,
+      timeline: { items: reordered.map((i, idx) => ({ ...i, order: idx })) },
+      tags: [], pinned: false,
+    });
+    assert.equal(put.status, 200);
+    assert.equal(put.data.note.timeline.items[0].text, 'untimed later');
+    assert.ok(put.data.note.content.startsWith('## 2026-10-30\n- [ ] untimed later'));
+    assert.ok(put.data.note.content.includes('- [ ] 07:30 morning run'));
+  } finally {
+    await server.stop();
+  }
+});
+
+test('invalid time ranges are rejected with invalid_item_time', async () => {
+  const server = await startServer();
+  try {
+    const cookie = await register(server.base, 'tltime2');
+    const mk = (extra) => req(server.base, cookie, 'POST', '/api/notes', {
+      title: 't', kind: 'timeline',
+      timeline: { items: [{ date: '2026-10-30', text: 'x', ...extra }] },
+      tags: [], pinned: false,
+    });
+    let r = await mk({ start: '9am' });
+    assert.equal(r.status, 400);
+    assert.equal(r.data.code, 'invalid_item_time');
+    r = await mk({ start: '25:00' });
+    assert.equal(r.status, 400);
+    assert.equal(r.data.code, 'invalid_item_time');
+    r = await mk({ end: '10:00' }); // end without start
+    assert.equal(r.status, 400);
+    assert.equal(r.data.code, 'invalid_item_time');
+    r = await mk({ start: '16:00', end: '14:00' }); // end before start
+    assert.equal(r.status, 400);
+    assert.equal(r.data.code, 'invalid_item_time');
+    // valid single time passes and a non-integer order coerces to null
+    r = await mk({ start: '09:05', order: 'nope' });
+    assert.equal(r.status, 201);
+    assert.equal(r.data.note.timeline.items[0].start, '09:05');
+    assert.equal(r.data.note.timeline.items[0].order, null);
+  } finally {
+    await server.stop();
+  }
+});
+
 test('session advertises timeline features', async () => {
   const server = await startServer();
   try {
     const s = await req(server.base, '', 'GET', '/api/session');
     assert.equal(s.data.features.timeline, true);
     assert.equal(s.data.features.timelineParse, false); // no config in tests by default
+  } finally {
+    await server.stop();
+  }
+});
+
+test('checking an item persists done and the mirror renders task bullets', async () => {
+  const server = await startServer();
+  try {
+    const cookie = await register(server.base, 'tldone');
+    const { data: { note } } = await req(server.base, cookie, 'POST', '/api/notes', {
+      title: 'chores', kind: 'timeline',
+      timeline: { items: [item('2026-10-30', 'wash dishes'), item('2026-10-30', 'buy milk')] },
+      tags: [], pinned: false,
+    });
+    // client sends the item back with done: true (ids round-trip stably)
+    const items = note.timeline.items.map((i) => ({ ...i, done: i.text === 'wash dishes' }));
+    const put = await req(server.base, cookie, 'PUT', `/api/notes/${note.id}`, {
+      title: 'chores', kind: 'timeline', rev: note.rev, timeline: { items }, tags: [], pinned: false,
+    });
+    assert.equal(put.status, 200);
+    const saved = put.data.note.timeline.items;
+    assert.deepEqual(saved.map((i) => [i.text, i.done]), [['wash dishes', true], ['buy milk', false]]);
+    assert.equal(put.data.note.content,
+      '## 2026-10-30\n- [x] wash dishes\n- [ ] buy milk');
+    // and it survives a reload of the store
+    const back = await req(server.base, cookie, 'GET', `/api/notes/${note.id}`);
+    assert.equal(back.data.note.timeline.items[0].done, true);
   } finally {
     await server.stop();
   }
@@ -257,7 +362,7 @@ test('parse endpoint: not configured -> 503; mock LLM happy path -> 200', async 
     rq.on('end', () => {
       captured = { auth: rq.headers.authorization || '', body: JSON.parse(raw) };
       rs.writeHead(200, { 'Content-Type': 'application/json' });
-      rs.end(minimaxBody('```json\n{"items":[{"date":"2026-10-28","text":"昨天的事"},{"date":"2026-10-30","text":"today thing","guessed":true}]}\n```'));
+      rs.end(minimaxBody('```json\n{"items":[{"date":"2026-10-28","start":"09:00","end":"10:30","text":"昨天的事"},{"date":"2026-10-30","start":"25:99","text":"bad clock dropped","guessed":true},{"date":"2026-10-30","text":"today thing","guessed":true}]}\n```'));
     });
   }, async ({ cfgFile }) => {
     const server = await startServer({ env: { CONFIG_FILE: cfgFile } });
@@ -269,8 +374,9 @@ test('parse endpoint: not configured -> 503; mock LLM happy path -> 200', async 
       assert.equal(r.status, 200);
       assert.equal(r.data.model, 'MiniMax-M3.1-Flash');
       assert.deepEqual(r.data.items, [
-        { date: '2026-10-28', text: '昨天的事', guessed: false },
-        { date: '2026-10-30', text: 'today thing', guessed: true },
+        { date: '2026-10-28', start: '09:00', end: '10:30', text: '昨天的事', guessed: false },
+        { date: '2026-10-30', start: null, end: null, text: 'bad clock dropped', guessed: true },
+        { date: '2026-10-30', start: null, end: null, text: 'today thing', guessed: true },
       ]);
       // what our client actually sent upstream: Bearer auth, the configured
       // model, and NO thinking field (MiniMax-M3.1-Flash rejects
@@ -351,7 +457,7 @@ test('lib/timeline unit: isDateKey, normalizeTimeline, mirror determinism', () =
 
   const keepId = 'a07b8c9d-1111-4222-8333-444455556666';
   const items = [
-    { id: keepId, date: '2026-10-02', text: '  padded  ', createdAt: 5, updatedAt: 5 },
+    { id: keepId, date: '2026-10-02', text: '  padded  ', done: true, createdAt: 5, updatedAt: 5 },
     { date: '2026-10-01', text: 'line one\nline two', createdAt: 3, updatedAt: 3 },
     { date: '2026-10-01', text: 'earlier created later in array', createdAt: 1, updatedAt: 1 },
   ];
@@ -361,11 +467,13 @@ test('lib/timeline unit: isDateKey, normalizeTimeline, mirror determinism', () =
   assert.equal(norm.items[0].text, 'earlier created later in array'); // date then createdAt
   assert.equal(norm.items[1].text, 'line one\nline two'); // stored raw, only mirror collapses
   assert.equal(norm.items[2].id, keepId); // UUID-shaped ids survive
+  assert.equal(norm.items[2].done, true); // done survives
+  assert.equal(norm.items[0].done, false); // absent done coerces to false
   // determinism: same input, same bytes
   const again = tl.normalizeTimeline({ items });
   assert.equal(again.markdown, norm.markdown);
   assert.equal(norm.markdown,
-    '## 2026-10-01\n- earlier created later in array\n- line one line two\n\n## 2026-10-02\n- padded');
+    '## 2026-10-01\n- [ ] earlier created later in array\n- [ ] line one line two\n\n## 2026-10-02\n- [x] padded');
   assert.deepEqual(tl.datesOf(norm.items), ['2026-10-01', '2026-10-02']);
   assert.equal(tl.itemCount(norm.items), 3);
 

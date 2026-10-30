@@ -186,6 +186,65 @@ class Api(private val store: Store) {
         folderId: String? = null,
     ): Note = parseNote(request("POST", "/api/notes", noteBody(title, content, tags, pinned, folderId)))
 
+    /** Create a timeline note; the server derives the markdown mirror. */
+    suspend fun createTimelineNote(
+        title: String,
+        items: List<TimelineItem>,
+        tags: List<String>,
+        pinned: Boolean,
+        folderId: String? = null,
+    ): Note = parseNote(request("POST", "/api/notes", JSONObject()
+        .put("kind", "timeline")
+        .put("timeline", TimelineItem.listToJson(items))
+        .put("title", title)
+        .put("tags", JSONArray(tags))
+        .put("pinned", pinned)
+        .put("folderId", folderId ?: JSONObject.NULL)))
+
+    /** Update a timeline note (kind + items; content is server-derived). */
+    suspend fun updateTimelineNote(
+        id: String,
+        title: String,
+        items: List<TimelineItem>,
+        tags: List<String>,
+        pinned: Boolean,
+        folderId: String? = null,
+        rev: Int? = null,
+    ): Note {
+        val body = JSONObject()
+            .put("kind", "timeline")
+            .put("timeline", TimelineItem.listToJson(items))
+            .put("title", title)
+            .put("tags", JSONArray(tags))
+            .put("pinned", pinned)
+            .put("folderId", folderId ?: JSONObject.NULL)
+        if (rev != null) body.put("rev", rev)
+        return parseNote(request("PUT", "/api/notes/$id", body))
+    }
+
+    /**
+     * Send pasted text (and nothing else) to the server's timeline parser.
+     * Returns { items, model }; throws ApiException (llm_not_configured /
+     * busy / too_many_requests / llm_timeout / llm_failed / llm_unparsable).
+     */
+    suspend fun parseTimeline(text: String, today: String): Pair<List<NotesTimeline.Parsed>, String> {
+        val j = request("POST", "/api/timeline/parse", JSONObject()
+            .put("text", text)
+            .put("today", today))
+        val a = j.optJSONArray("items") ?: JSONArray()
+        val items = List(a.length()) { i ->
+            val o = a.optJSONObject(i) ?: JSONObject()
+            NotesTimeline.Parsed(
+                date = o.optString("date"),
+                text = o.optString("text"),
+                guessed = o.optBoolean("guessed"),
+                start = o.optString("start").ifEmpty { null },
+                end = o.optString("end").ifEmpty { null },
+            )
+        }
+        return items to j.optString("model")
+    }
+
     suspend fun updateNote(
         id: String,
         title: String,

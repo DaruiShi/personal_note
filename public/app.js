@@ -2150,11 +2150,49 @@
     }
   }
 
+  /** A preset chip that writes its range into the two time inputs;
+      clicking the active preset clears both (toggle off). */
+  function tlPresetRow(startInput, endInput) {
+    const row = el('div', 'tl-presets');
+    const sync = () => {
+      for (const chip of row.children) {
+        const p = NotesTimeline.TIME_PRESETS[Number(chip.dataset.preset)];
+        chip.classList.toggle('active', startInput.value === p.start && endInput.value === p.end);
+      }
+    };
+    NotesTimeline.TIME_PRESETS.forEach((p, i) => {
+      const chip = el('button', 'tl-preset', p.label);
+      chip.type = 'button';
+      chip.dataset.preset = String(i);
+      chip.title = `${p.start}–${p.end}`;
+      chip.addEventListener('click', () => {
+        if (startInput.value === p.start && endInput.value === p.end) {
+          startInput.value = '';
+          endInput.value = '';
+        } else {
+          startInput.value = p.start;
+          endInput.value = p.end;
+        }
+        sync();
+      });
+      row.append(chip);
+    });
+    [startInput, endInput].forEach((inp) => inp.addEventListener('input', sync));
+    sync();
+    return row;
+  }
+
   function renderTlPage(page, date, items, note) {
-    const dayItems = items.filter((i) => i.date === date);
+    // Display order is the canonical comparator (order/time/createdAt) —
+    // never the raw array order, which only the server normalises on save.
+    const dayItems = NotesTimeline.sortItems(items.filter((i) => i.date === date));
+    const doneCount = dayItems.filter((i) => i.done === true).length;
     const head = el('div', 'tl-page-head');
     head.append(el('span', 'tl-page-date', NotesLinks.formatDayLabel(date)));
-    head.append(el('span', 'tl-page-count', `${dayItems.length} item${dayItems.length === 1 ? '' : 's'}`));
+    head.append(el('span', 'tl-page-count',
+      doneCount > 0
+        ? `${dayItems.length} item${dayItems.length === 1 ? '' : 's'} · ${doneCount} done`
+        : `${dayItems.length} item${dayItems.length === 1 ? '' : 's'}`));
     page.append(head);
 
     if (items.length === 0 && date === tlToday()) {
@@ -2171,20 +2209,49 @@
     ta.rows = 2;
     ta.dataset.role = 'tl-add-text';
     ta.dataset.date = date;
+    const times = el('div', 'tl-add-times');
+    const start = el('input', 'tl-add-start');
+    start.type = 'time';
+    start.dataset.role = 'tl-add-start';
+    start.title = 'Start time (optional)';
+    start.setAttribute('aria-label', 'Start time');
+    times.append(start, el('span', 'tl-time-sep', '–'));
+    const end = el('input', 'tl-add-end');
+    end.type = 'time';
+    end.dataset.role = 'tl-add-end';
+    end.title = 'End time (optional)';
+    end.setAttribute('aria-label', 'End time');
+    times.append(end);
+    const presets = tlPresetRow(start, end);
     const btn = el('button', 'btn sm primary', 'Add');
     btn.type = 'button';
     btn.dataset.role = 'tl-add-btn';
     btn.dataset.date = date;
-    add.append(ta, btn);
+    const controls = el('div', 'tl-add-controls');
+    controls.append(times, presets, btn);
+    add.append(ta, controls);
     page.append(add);
   }
 
+  function tlTimeLabel(item) {
+    if (!item.start) return '';
+    return item.end ? `${item.start}–${item.end}` : item.start;
+  }
+
   function tlItemRow(item) {
-    const row = el('article', 'tl-item');
+    const row = el('article', 'tl-item' + (item.done ? ' done' : ''));
     row.dataset.id = item.id;
+    row.draggable = true; // reorder within the date (desktop; drag handler below)
+    const cb = el('input', 'tl-done');
+    cb.type = 'checkbox';
+    cb.checked = item.done === true;
+    cb.dataset.id = item.id;
+    cb.setAttribute('aria-label', 'Mark done');
+    cb.title = item.done ? 'Mark as not done' : 'Mark as done';
     const body = el('div', 'tl-item-body');
     body.append(el('div', 'tl-item-text', item.text));
-    body.append(el('div', 'tl-item-time', fmtRel(item.updatedAt || item.createdAt)));
+    const metaBits = [tlTimeLabel(item), fmtRel(item.updatedAt || item.createdAt)].filter(Boolean);
+    body.append(el('div', 'tl-item-time', metaBits.join(' · ')));
     const actions = el('div', 'tl-item-actions');
     for (const [act, label] of [['edit', 'Edit item'], ['move', 'Move item to another date'], ['delete', 'Delete item']]) {
       const b = el('button', 'icon-btn tl-act');
@@ -2196,7 +2263,7 @@
       b.innerHTML = act === 'edit' ? ICONS.edit(14) : act === 'move' ? ICONS.calendar(14) : ICONS.x(13);
       actions.append(b);
     }
-    row.append(body, actions);
+    row.append(cb, body, actions);
     return row;
   }
 
@@ -2216,6 +2283,17 @@
     const ta = el('textarea', 'tl-edit-text');
     ta.value = item.text;
     ta.rows = 2;
+    const times = el('div', 'tl-edit-times');
+    const start = el('input', 'tl-edit-start');
+    start.type = 'time';
+    start.value = item.start || '';
+    start.setAttribute('aria-label', 'Start time');
+    const end = el('input', 'tl-edit-end');
+    end.type = 'time';
+    end.value = item.end || '';
+    end.setAttribute('aria-label', 'End time');
+    times.append(start, el('span', 'tl-time-sep', '–'), end);
+    const presets = tlPresetRow(start, end);
     const row = el('div', 'tl-edit-actions');
     const save = el('button', 'btn sm primary', 'Save');
     save.type = 'button';
@@ -2223,7 +2301,17 @@
     cancel.type = 'button';
     save.addEventListener('click', () => {
       const v = ta.value.trim();
-      if (v) tlMutate((items) => NotesTimeline.updateItemText(items, item.id, v));
+      if (!v) return;
+      const s = start.value || null;
+      const e2 = end.value || null;
+      const timesChanged = (item.start || null) !== s || (item.end || null) !== e2;
+      tlMutate((items) => {
+        let next = NotesTimeline.updateItemText(items, item.id, v);
+        // Re-slot by time only when the times changed, so a manual drag
+        // order survives plain text edits.
+        if (timesChanged) next = NotesTimeline.updateItemTime(next, item.id, s, e2);
+        return next;
+      });
     });
     cancel.addEventListener('click', () => renderTimeline({ keepScroll: true }));
     ta.addEventListener('keydown', (e) => {
@@ -2231,7 +2319,7 @@
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); save.click(); }
     });
     row.append(save, cancel);
-    article.append(ta, row);
+    article.append(ta, times, presets, row);
     ta.focus();
   }
 
@@ -2262,6 +2350,14 @@
     input.focus();
   }
 
+  // Checking/unchecking an item flows through the same mutate path as the
+  // other edits: flip in memory, re-render, autosave.
+  ui.tlScroller.addEventListener('change', (e) => {
+    const cb = e.target.closest('input.tl-done');
+    if (!cb) return;
+    tlMutate((items) => NotesTimeline.toggleDone(items, cb.dataset.id));
+  });
+
   // One delegated listener for item actions and per-page add fields.
   ui.tlScroller.addEventListener('click', (e) => {
     const act = e.target.closest('.tl-act');
@@ -2285,8 +2381,12 @@
       const page = addBtn.closest('.tl-page');
       const ta = page && page.querySelector('[data-role="tl-add-text"]');
       if (ta && ta.value.trim()) {
-        tlMutate((items) => [...items, NotesTimeline.makeItem(addBtn.dataset.date, ta.value)]);
+        const s = (page.querySelector('[data-role="tl-add-start"]') || {}).value || null;
+        const en = (page.querySelector('[data-role="tl-add-end"]') || {}).value || null;
+        tlMutate((items) => NotesTimeline.insertItem(
+          items, NotesTimeline.makeItem(addBtn.dataset.date, ta.value, undefined, s, en)));
       }
+      return;
     }
   });
 
@@ -2295,13 +2395,72 @@
     if (ta && e.key === 'Enter' && !e.shiftKey) {
       // Enter adds, Shift+Enter inserts a newline.
       e.preventDefault();
-      if (ta.value.trim()) tlMutate((items) => [...items, NotesTimeline.makeItem(ta.dataset.date, ta.value)]);
+      if (ta.value.trim()) {
+        const page = ta.closest('.tl-page');
+        const s = (page.querySelector('[data-role="tl-add-start"]') || {}).value || null;
+        const en = (page.querySelector('[data-role="tl-add-end"]') || {}).value || null;
+        tlMutate((items) => NotesTimeline.insertItem(
+          items, NotesTimeline.makeItem(ta.dataset.date, ta.value, undefined, s, en)));
+      }
       return;
     }
     if (e.target !== ui.tlScroller) return;
     if (e.key === 'ArrowLeft') { e.preventDefault(); stepDay(-1); }
     else if (e.key === 'ArrowRight') { e.preventDefault(); stepDay(1); }
     else if (e.key === 't' || e.key === 'T') { e.preventDefault(); jumpToDate(tlToday()); }
+  });
+
+  /* Drag-and-drop reorder within a date: the dragged row lands before the
+     row under the cursor's upper half, or last when dropped below all. */
+  let tlDragId = null;
+  ui.tlScroller.addEventListener('dragstart', (e) => {
+    const row = e.target.closest('.tl-item');
+    if (!row) return;
+    tlDragId = row.dataset.id;
+    row.classList.add('dragging');
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = 'move';
+      try { e.dataTransfer.setData('text/plain', tlDragId); } catch { /* IE quirk */ }
+    }
+  });
+  ui.tlScroller.addEventListener('dragend', () => {
+    tlDragId = null;
+    ui.tlScroller.querySelectorAll('.tl-item.dragging, .tl-item.drop-before').forEach((r) =>
+      r.classList.remove('dragging', 'drop-before'));
+  });
+  ui.tlScroller.addEventListener('dragover', (e) => {
+    if (!tlDragId) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    const row = e.target.closest('.tl-item');
+    ui.tlScroller.querySelectorAll('.tl-item.drop-before').forEach((r) => r.classList.remove('drop-before'));
+    if (row && row.dataset.id !== tlDragId) {
+      const rect = row.getBoundingClientRect();
+      if (e.clientY < rect.top + rect.height / 2) row.classList.add('drop-before');
+    }
+  });
+  ui.tlScroller.addEventListener('drop', (e) => {
+    if (!tlDragId) return;
+    e.preventDefault();
+    const row = e.target.closest('.tl-item');
+    const dragged = tlItems().find((i) => i.id === tlDragId);
+    if (!dragged) return;
+    let beforeId = null;
+    if (row && row.dataset.id !== tlDragId) {
+      const sameDate = tlItems().find((i) => i.id === row.dataset.id);
+      const rect = row.getBoundingClientRect();
+      const upper = e.clientY < rect.top + rect.height / 2;
+      // crossing dates via drop = a move to that date, landing by time
+      if (sameDate && sameDate.date === dragged.date) beforeId = upper ? row.dataset.id : null;
+      else if (sameDate) {
+        tlMutate((items) => NotesTimeline.moveItem(items, tlDragId, sameDate.date));
+        tlDragId = null;
+        return;
+      }
+    }
+    const finalId = beforeId; // moveWithinDate inserts before it, or last
+    tlMutate((items) => NotesTimeline.moveWithinDate(items, tlDragId, finalId));
+    tlDragId = null;
   });
 
   function jumpToDate(date, behavior = 'smooth', opts = {}) {
@@ -2382,6 +2541,8 @@
       for (const item of g.items) {
         const row = el('div', 'tl-res-row');
         row.dataset.text = item.text;
+        row.dataset.start = item.start || '';
+        row.dataset.end = item.end || '';
         const cb = el('input', 'tl-res-check');
         cb.type = 'checkbox';
         cb.checked = true;
@@ -2390,6 +2551,10 @@
         date.value = item.date;
         const txt = el('span', 'tl-res-text', item.text);
         row.append(cb, date, txt);
+        if (item.start) {
+          row.append(el('span', 'tl-res-time',
+            item.end ? `${item.start}–${item.end}` : item.start));
+        }
         if (item.guessed) row.append(el('span', 'tl-res-guessed', 'date guessed'));
         ui.tlParseResults.append(row);
       }
@@ -2450,7 +2615,7 @@
       if (!cb || !cb.checked) continue;
       const dateInput = row.querySelector('.tl-res-date-input');
       const date = dateInput.value && NotesLinks.isDateTitle(dateInput.value) ? dateInput.value : tlToday();
-      selected.push({ date, text: row.dataset.text });
+      selected.push({ date, text: row.dataset.text, start: row.dataset.start || null, end: row.dataset.end || null });
     }
     if (selected.length) {
       note.timeline = { items: NotesTimeline.mergeParsed(tlItems(note), selected) };

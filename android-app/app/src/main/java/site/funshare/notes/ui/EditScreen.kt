@@ -385,11 +385,13 @@ fun EditScreen(vm: AppViewModel) {
                     }
                 },
                 actions = {
-                    IconButton(onClick = { preview = !preview }) {
-                        Icon(
-                            if (preview) Icons.Filled.Edit else Icons.AutoMirrored.Filled.MenuBook,
-                            contentDescription = if (preview) "Edit" else "Preview",
-                        )
+                    if (!vm.editIsTimeline) {
+                        IconButton(onClick = { preview = !preview }) {
+                            Icon(
+                                if (preview) Icons.Filled.Edit else Icons.AutoMirrored.Filled.MenuBook,
+                                contentDescription = if (preview) "Edit" else "Preview",
+                            )
+                        }
                     }
                     IconButton(onClick = {
                         if (shareBusy) return@IconButton
@@ -457,7 +459,12 @@ fun EditScreen(vm: AppViewModel) {
                 )
             }
             Box(Modifier.weight(1f)) {
-            if (preview) {
+            if (vm.editIsTimeline) {
+                TimelineEditor(
+                    vm = vm,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            } else if (preview) {
                 val fontScale = vm.previewFontScale
                 // Wikilinks become markdown links with a private scheme the
                 // link resolver routes back into the app; code stays literal.

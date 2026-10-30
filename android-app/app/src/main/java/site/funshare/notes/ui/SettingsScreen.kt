@@ -57,6 +57,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import site.funshare.notes.AppViewModel
@@ -309,7 +310,7 @@ fun SettingsScreen(vm: AppViewModel) {
 
         Spacer(Modifier.height(20.dp))
         Text(
-            "Funshare Notes 1.19 · self-hosted notes",
+            "Funshare Notes 1.24 · self-hosted notes",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.align(Alignment.CenterHorizontally),

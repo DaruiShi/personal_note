@@ -88,6 +88,13 @@ the phone app share one account and the same notes.
 - **Daily notes** — the calendar action on the notes screen opens (or
   creates) today's note titled `YYYY-MM-DD`; while such a note is open, a
   ‹ label › Today bar steps between days. Daily notes are plain notes.
+- **Timeline notes** — the timeline action creates a date-organised note:
+  swipe between date pages (items + today + visited), check items done,
+  add / edit / move / delete them with optional HH:MM-HH:MM time ranges
+  (timed items sort first, untimed last; quick Morning / Noon / Afternoon /
+  Evening presets), long-press-drag rows into a manual order, and paste text to parse into dated, timed items (server AI
+  when configured, local basic parser otherwise). Saves carry `kind:
+  timeline` + items; conflicts keep the existing dialog.
 - **Preview text size** — Settings → Appearance offers Small / Default /
   Large / Huge; the scale applies to the preview title and body and is
   remembered.
@@ -145,7 +152,7 @@ In Android Studio: open the `android-app` folder and press Run.
 
 ## Install on the Redmi K80 Pro
 
-1. Copy `FunshareNotes-v1.19.apk` to the phone (USB transfer, 微信文件传输助手, etc.).
+1. Copy `FunshareNotes-v1.24.apk` to the phone (USB transfer, 微信文件传输助手, etc.).
 2. Open it from the file manager (小米文件管理 → 安装包). HyperOS will ask
    to allow installing from this source — allow it once.
 3. First screen: set the **server address** (see below), then sign in with

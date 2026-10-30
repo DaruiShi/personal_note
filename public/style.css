@@ -1228,3 +1228,65 @@ input, textarea { font: inherit; color: inherit; }
 .tl-res-date-input { font: inherit; font-size: 12.5px; color: var(--text-2); border: 1px solid var(--border); border-radius: 6px; padding: 3px 4px; background: var(--surface); }
 .tl-res-text { font-size: 13.5px; color: var(--text); flex: 1; min-width: 160px; }
 .tl-res-guessed { font-size: 11px; color: var(--warn); flex-shrink: 0; }
+
+/* timeline item checkboxes */
+.tl-done {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  margin: 2px 0 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.tl-item.done .tl-item-text {
+  text-decoration: line-through;
+  text-decoration-color: var(--muted);
+  color: var(--muted);
+}
+.tl-item.done .tl-item-time { color: var(--muted); }
+
+/* timeline times + drag reorder */
+.tl-add-times, .tl-edit-times { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.tl-add-times input[type="time"], .tl-edit-times input[type="time"] {
+  font: inherit; font-size: 12.5px; color: var(--text-2);
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 5px 4px; background: var(--surface);
+  width: 92px;
+}
+.tl-time-sep { color: var(--muted); }
+.tl-add { align-items: flex-end; }
+.tl-item-time { font-variant-numeric: tabular-nums; }
+.tl-item[draggable="true"] { cursor: grab; }
+.tl-item.dragging { opacity: 0.45; cursor: grabbing; }
+.tl-item.drop-before { box-shadow: 0 -2px 0 0 var(--accent); }
+.tl-res-time {
+  font-size: 11.5px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+/* time-range preset chips (Morning / Noon / Afternoon / Evening) */
+.tl-add { flex-direction: column; gap: 6px; align-items: stretch; }
+.tl-add-controls { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.tl-presets { display: flex; flex-wrap: wrap; gap: 4px; }
+.tl-preset {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-2);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.tl-preset:hover { border-color: var(--border-strong); color: var(--text); }
+.tl-preset.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.tl-edit-times { align-self: flex-start; }
