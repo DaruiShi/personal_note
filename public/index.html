@@ -50,8 +50,9 @@
         <input id="search-input" type="text" placeholder="Search notes&hellip;" autocomplete="off" spellcheck="false">
       </div>
 
-      <div class="folders-head">
-        <span class="folders-label">Folders</span>
+      <div class="folders-head" id="folders-head">
+        <button class="icon-btn folders-toggle" id="folders-toggle" type="button" title="Fold folders" aria-label="Fold folders" aria-expanded="true"></button>
+        <span class="folders-label" id="folders-label">Folders</span>
         <button class="icon-btn" id="add-folder-btn" title="New folder" aria-label="New folder"></button>
       </div>
       <div id="folder-list" class="folder-list"></div>
@@ -193,6 +194,10 @@
       <div class="share-row hidden" id="share-row">
         <input type="text" id="share-link" readonly>
         <button class="btn" id="share-copy" type="button">Copy</button>
+      </div>
+      <div class="share-qr hidden" id="share-qr-row">
+        <img id="share-qr" alt="QR code for this share link" width="160" height="160">
+        <span class="share-qr-hint">Scan to open on a phone</span>
       </div>
       <div class="modal-actions">
         <button class="btn danger-outline hidden" id="share-revoke" type="button">Revoke link</button>

@@ -129,7 +129,11 @@ sudo systemctl edit notes
 ```ini
 [Service]
 Environment=TRUST_PROXY=1
+Environment=PUBLIC_BASE_URL=https://notes.example.com
 ```
+
+Set `PUBLIC_BASE_URL` to the same domain Caddy serves — it is the origin
+baked into share-page `og:url`/`canonical` tags and QR codes.
 
 ```bash
 sudo systemctl restart notes

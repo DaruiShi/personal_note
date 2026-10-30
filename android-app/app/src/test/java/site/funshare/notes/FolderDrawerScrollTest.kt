@@ -1,12 +1,13 @@
 package site.funshare.notes
 
+import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasScrollAction
 import androidx.compose.ui.test.hasText
-import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performScrollToNode
 import org.junit.Assert.assertTrue
@@ -27,20 +28,26 @@ import site.funshare.notes.ui.FolderDrawerContent
 class FolderDrawerScrollTest {
 
     @get:Rule
-    val rule = createComposeRule()
+    val rule = createAndroidComposeRule<MainActivity>()
 
     private fun showFolders(folders: List<Folder>) {
-        rule.setContent {
-            Box(Modifier.fillMaxSize()) {
-                FolderDrawerContent(
-                    noteCount = 42,
-                    unfiledCount = 7,
-                    folders = displayOrder(folders),
-                    selectedFolderId = null,
-                    onSelect = {},
-                    onNewFolder = {},
-                    onFolderMenu = {},
-                )
+        // MainActivity already sets content in onCreate, so replace it via
+        // the activity's own setContent (the rule's setContent would throw).
+        // Robolectric resolves MainActivity from the app manifest — no
+        // ui-test-manifest/ComponentActivity registration needed.
+        rule.runOnUiThread {
+            rule.activity.setContent {
+                Box(Modifier.fillMaxSize()) {
+                    FolderDrawerContent(
+                        noteCount = 42,
+                        unfiledCount = 7,
+                        folders = displayOrder(folders),
+                        selectedFolderId = null,
+                        onSelect = {},
+                        onNewFolder = {},
+                        onFolderMenu = {},
+                    )
+                }
             }
         }
         rule.waitForIdle()

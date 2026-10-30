@@ -13,6 +13,9 @@ Environment=HOST=127.0.0.1
 # Set to 1 when behind a reverse proxy (nginx/Caddy) so login rate limiting
 # sees real client IPs from X-Forwarded-For:
 #Environment=TRUST_PROXY=1
+# Public origin (scheme + host) used for share-link previews and QR codes;
+# unset means the app derives it from the request Host header:
+#Environment=PUBLIC_BASE_URL=https://notes.example.com
 Restart=on-failure
 RestartSec=5
 

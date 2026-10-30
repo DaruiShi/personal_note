@@ -24,6 +24,16 @@ const fsp = require('fs/promises');
 const path = require('path');
 const crypto = require('crypto');
 
+// QR encoder (vendored, MIT — see lib/qr.js). A missing or broken module
+// disables the QR feature (features.qr: false, 404 on the endpoint) instead
+// of taking the server down.
+let qr = null;
+try {
+  qr = require('./lib/qr');
+} catch (err) {
+  console.warn(`Warning: QR encoder unavailable (${err.message}); share-link QR codes stay disabled.`);
+}
+
 /* ------------------------------------------------------------------ config */
 
 const PORT = Number(process.env.PORT) || 3000;
@@ -32,6 +42,27 @@ const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const DB_FILE = path.join(DATA_DIR, 'notes.json');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const TRUST_PROXY = process.env.TRUST_PROXY === '1';
+
+// Public origin for absolute share URLs (og:url, og:image, QR codes).
+// Optional: when unset, derived per request from X-Forwarded-Proto / Host —
+// the Host header is only trusted after strict validation (see requestOrigin).
+let publicBaseUrl = null;
+{
+  const raw = (process.env.PUBLIC_BASE_URL || '').trim();
+  if (raw) {
+    try {
+      const u = new URL(raw);
+      if (u.protocol === 'http:' || u.protocol === 'https:') publicBaseUrl = u.origin;
+      else console.warn(`Warning: PUBLIC_BASE_URL must be an http(s) URL; ignoring "${raw}".`);
+    } catch {
+      console.warn(`Warning: PUBLIC_BASE_URL is not a valid URL; ignoring "${raw}".`);
+    }
+  } else {
+    console.warn('Warning: PUBLIC_BASE_URL is not set — absolute links will follow the request Host header.');
+  }
+}
+
+const HOST_RE = /^[A-Za-z0-9.\-]+(:\d{1,5})?$/; // at most 253 chars enforced at use
 
 const SESSION_COOKIE = 'notes_session';
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
@@ -632,8 +663,9 @@ async function handleApi(req, res, pathname) {
       authenticated: !!user,
       user: user ? publicUser(user) : null,
       registrationOpen: db.settings.registrationOpen,
-      features: { trash: true, history: true, conflicts: true },
+      features: { trash: true, history: true, conflicts: true, qr: qr != null },
       trashRetentionDays: db.settings.trashRetentionDays,
+      publicBaseUrl,
     });
   }
 
@@ -1134,6 +1166,132 @@ async function handleApi(req, res, pathname) {
   return sendJson(res, 404, { error: 'Not found' });
 }
 
+/* ---------------------------------------------------- share page head
+   The SPA shell is served for /share/<token> with a server-rendered <head>
+   (title, description, Open Graph / Twitter tags, canonical, noindex) so
+   link unfurls show a real card. The note BODY stays client-rendered. */
+
+const escapeHtml = (v) => String(v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+// Absolute origin for og:url / og:image: the configured PUBLIC_BASE_URL, or
+// a per-request derivation that never interpolates an unchecked Host header.
+function requestOrigin(req) {
+  if (publicBaseUrl) return publicBaseUrl;
+  let proto = 'http';
+  const fwd = req.headers['x-forwarded-proto'];
+  if (typeof fwd === 'string' && fwd.length) proto = fwd.split(',')[0].trim();
+  else if (req.socket && req.socket.encrypted) proto = 'https';
+  const host = req.headers.host;
+  if (typeof host === 'string' && host.length <= 253 && HOST_RE.test(host)) {
+    return `${proto}://${host}`;
+  }
+  return `http://localhost:${PORT}`;
+}
+
+// Single-line excerpt of the markdown body, target 160 chars. Truncates on
+// code points (Array.from), never mid-surrogate-pair.
+function shareExcerpt(content) {
+  const text = String(content || '')
+    .replace(/```[\s\S]*?```/g, ' ')                 // fenced code blocks
+    .replace(/`([^`]*)`/g, '$1')                     // inline code
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')        // images -> alt text
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')         // links -> text
+    .replace(/<[^>]+>/g, ' ')                        // raw HTML tags
+    .replace(/^\s{0,3}#{1,6}\s+/gm, '')              // heading hashes
+    .replace(/(\*\*|__|\*|~~)/g, '')                 // emphasis markers
+    .replace(/^\s{0,3}>\s?/gm, '')                   // blockquote markers
+    .replace(/^\s*([-*+]|\d+[.)])\s+/gm, '')         // list markers
+    .replace(/^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/gm, ' ') // table separators
+    .replace(/\|/g, ' ')                             // table pipes
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!text) return 'A shared note.';
+  const chars = Array.from(text);
+  return chars.length <= 160 ? text : chars.slice(0, 160).join('') + '...';
+}
+
+// First image the note references: markdown image with alt text first, then
+// any bare upload path. The regexes only ever match local /uploads/ image
+// paths, so og:image cannot be pointed at an arbitrary or off-site URL.
+function shareImage(content) {
+  const c = String(content || '');
+  let m = c.match(/!\[([^\]]*)\]\((\/uploads\/[a-f0-9]{32}\.(?:png|jpe?g|gif|webp))\)/);
+  if (m) return { path: m[2], alt: m[1] };
+  m = c.match(/\/uploads\/[a-f0-9]{32}\.(?:png|jpe?g|gif|webp)/);
+  if (m) return { path: m[0], alt: '' };
+  return null;
+}
+
+// Pure builder for the share page's <head> block. Every interpolated value
+// is HTML-attribute-escaped.
+function renderShareHead(note, origin, token, hasDefaultImage) {
+  const e = escapeHtml;
+  const title = note.title || 'Shared note'; // matches the SPA's own fallback
+  const absoluteUrl = `${origin}/share/${token}`;
+  const excerpt = shareExcerpt(note.content);
+  const img = shareImage(note.content);
+  const imageUrl = img ? `${origin}${img.path}?s=${token}` : (hasDefaultImage ? `${origin}/og-default.png` : null);
+  const imageAlt = img ? (img.alt || title) : title;
+  const m = [];
+  m.push(`<meta name="description" content="${e(excerpt)}">`);
+  m.push(`<link rel="canonical" href="${e(absoluteUrl)}">`);
+  m.push('<meta name="robots" content="noindex, nofollow, noarchive">');
+  m.push('<meta property="og:type" content="article">');
+  m.push('<meta property="og:site_name" content="Notes">');
+  m.push(`<meta property="og:title" content="${e(title)}">`);
+  m.push(`<meta property="og:description" content="${e(excerpt)}">`);
+  m.push(`<meta property="og:url" content="${e(absoluteUrl)}">`);
+  if (imageUrl) {
+    m.push(`<meta property="og:image" content="${e(imageUrl)}">`);
+    m.push(`<meta property="og:image:alt" content="${e(imageAlt)}">`);
+  }
+  m.push(`<meta property="article:modified_time" content="${new Date(note.updatedAt).toISOString()}">`);
+  m.push(`<meta name="twitter:card" content="${imageUrl ? 'summary_large_image' : 'summary'}">`);
+  m.push(`<meta name="twitter:title" content="${e(title)}">`);
+  m.push(`<meta name="twitter:description" content="${e(excerpt)}">`);
+  if (imageUrl) m.push(`<meta name="twitter:image" content="${e(imageUrl)}">`);
+  return { title: `${title} — Notes`, metas: m.join('\n    ') };
+}
+
+// Cached at startup; null when the shell could not be read (then /share/
+// behaves exactly as before).
+let shareShell = null;
+let ogDefaultExists = false;
+
+function sendShareShell(res, status, html) {
+  res.writeHead(status, {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Cache-Control': 'no-store',
+    'X-Robots-Tag': 'noindex, nofollow, noarchive',
+    ...SECURITY_HEADERS,
+  });
+  res.end(html);
+}
+
+// /share/<token>: the SPA shell with a per-note head for a live shared
+// note; a generic noindex shell (404) for unknown/revoked/trashed tokens.
+async function sendSharePage(req, res, token) {
+  if (!shareShell) return serveStatic(res, '/');
+  const note = token
+    ? db.notes.find((n) => n.share && n.share.token === token && n.deletedAt == null) || null
+    : null;
+  const origin = requestOrigin(req);
+  const meta = note
+    ? renderShareHead(note, origin, token, ogDefaultExists)
+    : { title: 'Note unavailable — Notes', metas: '<meta name="robots" content="noindex, nofollow, noarchive">' };
+  const html = note
+    ? shareShell
+        // the shell ships a static description; the note's replaces it
+        // (keeping both would let crawlers pick the generic one)
+        .replace(/<meta name="description"[^>]*>/, '')
+        .replace('<title>Notes</title>', `<title>${escapeHtml(meta.title)}</title>`)
+        .replace('</head>', `  ${meta.metas}\n</head>`)
+    : shareShell
+        .replace('<title>Notes</title>', `<title>${escapeHtml(meta.title)}</title>`)
+        .replace('</head>', `  ${meta.metas}\n</head>`);
+  sendShareShell(res, note ? 200 : 404, html);
+}
+
 /* ------------------------------------------------------------------ static */
 
 async function serveStatic(res, pathname) {
@@ -1229,14 +1387,42 @@ async function route(req, res) {
   if (req.method !== 'GET') {
     return sendJson(res, 405, { error: 'Method not allowed' });
   }
-  // /share/<token> is a client-side route — serve the app shell.
-  if (pathname.startsWith('/share/')) return serveStatic(res, '/');
+  // /share/<token>/qr.svg — the QR code of the absolute share URL. The QR of
+  // a token never changes, so it is cacheable even after revocation (the
+  // encoded URL itself then 404s).
+  const sq = pathname.match(/^\/share\/([a-f0-9]{32})\/qr\.svg$/);
+  if (sq) {
+    const note = qr && db.notes.find((n) => n.share && n.share.token === sq[1] && n.deletedAt == null);
+    if (!note) return sendSharePage(req, res, null); // same 404 shell as A3
+    res.writeHead(200, {
+      'Content-Type': 'image/svg+xml; charset=utf-8',
+      'Cache-Control': 'public, max-age=86400',
+      ...SECURITY_HEADERS,
+    });
+    return res.end(qr.toSvg(`${requestOrigin(req)}/share/${sq[1]}`, { scale: 4 }));
+  }
+
+  // /share/<token> is a client-side route — serve the app shell, with a
+  // server-rendered <head> for valid tokens. Anything else under /share/
+  // (malformed tokens, revoked links) gets the same shell as a 404 so the
+  // SPA still renders its friendly "Note unavailable" message.
+  const sp = pathname.match(/^\/share\/([a-f0-9]{32})$/);
+  if (sp) return sendSharePage(req, res, sp[1]);
+  if (pathname.startsWith('/share/')) return sendSharePage(req, res, null);
   return serveStatic(res, pathname);
 }
 
-loadDb().then(() => {
+loadDb().then(async () => {
   sweepTrash(); // fire-and-forget: startup never waits on the sweep
   setInterval(sweepTrash, 60 * 60 * 1000);
+  // Cache the SPA shell once for server-rendered share heads (not per
+  // request). A read failure falls back to the old behaviour.
+  try {
+    shareShell = await fsp.readFile(path.join(PUBLIC_DIR, 'index.html'), 'utf8');
+  } catch (err) {
+    console.warn(`Warning: could not read the app shell for share pages (${err.message}); serving it unmodified.`);
+  }
+  ogDefaultExists = await fsp.access(path.join(PUBLIC_DIR, 'og-default.png')).then(() => true).catch(() => false);
   http
     .createServer((req, res) => {
       route(req, res).catch((err) => {

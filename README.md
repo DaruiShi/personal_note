@@ -27,6 +27,12 @@ browser (desktop or phone), and keep your notes private behind a login.
   25 MB per file
 - Share a note with a public link: a read-only page that works without an
   account (its images and attachments included); revocable any time
+- **Link previews** — the public share page is server-rendered with Open
+  Graph / Twitter Card meta tags (title, description, first image), so
+  pasting the link into chat apps or social sites shows a rich card; the
+  page itself stays `noindex, nofollow, noarchive`
+- **QR code for share links** — the share dialog shows a scannable QR code
+  (`/share/<token>/qr.svg`) so a phone can open the note directly
 - Adjustable preview font size (− / % / + controls in preview mode,
   remembered per browser)
 - Folders: create your own folders, rename or delete them any time, and
@@ -144,6 +150,12 @@ systemd unit (and restart it) so login rate limiting sees real client IPs.
 | `HOST`        | `0.0.0.0` | Listen address (use `127.0.0.1` behind a proxy)  |
 | `DATA_DIR`    | `./data`  | Directory holding `notes.json`                   |
 | `TRUST_PROXY` | off       | `1` = honor `X-Forwarded-For` (behind a proxy)   |
+| `PUBLIC_BASE_URL` | unset | Public origin (`https://notes.example.com`) used in share-page `og:url`/`canonical` tags and QR codes; unset = derive from the request |
+
+**Link previews:** share pages build their Open Graph tags from the request
+host by default. Behind a reverse proxy, set `PUBLIC_BASE_URL` (and
+`TRUST_PROXY=1`) so previews and QR codes always carry your public domain
+instead of `127.0.0.1:3000`.
 
 ## Backups & recovery
 
@@ -205,7 +217,7 @@ test/                     node:test suite (npm test)
 ## Android app
 
 A native Android client lives in [`android-app/`](android-app/README.md) —
-the signed APK is `android-app/FunshareNotes-v1.16.apk`. It connects to this
+the signed APK is `android-app/FunshareNotes-v1.17.apk`. It connects to this
 server's JSON API with the same accounts and notes as the website, and its
 server address is configurable on the sign-in screen.
 

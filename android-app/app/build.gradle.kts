@@ -13,8 +13,8 @@ android {
         applicationId = "site.funshare.notes"
         minSdk = 26
         targetSdk = 35
-        versionCode = 17
-        versionName = "1.16"
+        versionCode = 18
+        versionName = "1.17"
     }
 
     signingConfigs {
@@ -83,5 +83,8 @@ dependencies {
     testImplementation("org.robolectric:robolectric:4.13")
     testImplementation(platform("androidx.compose:compose-bom:2024.10.01"))
     testImplementation("androidx.compose.ui:ui-test-junit4")
+    // release unit tests don't see debugImplementation, so register the
+    // ComposeTestRule ComponentActivity for Robolectric on both variants
+    testImplementation("androidx.compose.ui:ui-test-manifest")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
 }

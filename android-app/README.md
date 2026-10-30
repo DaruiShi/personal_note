@@ -130,7 +130,7 @@ In Android Studio: open the `android-app` folder and press Run.
 
 ## Install on the Redmi K80 Pro
 
-1. Copy `FunshareNotes-v1.16.apk` to the phone (USB transfer, 微信文件传输助手, etc.).
+1. Copy `FunshareNotes-v1.17.apk` to the phone (USB transfer, 微信文件传输助手, etc.).
 2. Open it from the file manager (小米文件管理 → 安装包). HyperOS will ask
    to allow installing from this source — allow it once.
 3. First screen: set the **server address** (see below), then sign in with

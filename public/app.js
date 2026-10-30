@@ -35,6 +35,7 @@
     download: (s = 14) => svg(`<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>`, s),
     pen: (s = 26) => svg(`<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>`, s),
     history: (s = 17) => svg(`<circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/>`, s),
+    chevron: (s = 14) => svg(`<polyline points="6 9 12 15 18 9"/>`, s),
   };
 
   /* ================================================================ markdown
@@ -450,6 +451,8 @@
     conflict: null,
     trashCache: [],
     trashRetentionDays: 30,
+    foldersCollapsed: localStorage.getItem('foldersCollapsed') === '1',
+    publicBaseUrl: null, // server-configured origin for absolute share links
     previewFont: (() => {
       const v = parseFloat(localStorage.getItem('previewFontSize'));
       return v >= 12 && v <= 24 ? v : 15.5;
@@ -466,6 +469,7 @@
     themeBtn: $('theme-btn'), logoutBtn: $('logout-btn'), newBtn: $('new-note-btn'), newIc: $('new-note-ic'),
     searchIcon: $('search-icon'), search: $('search-input'), tagFilter: $('tag-filter'), list: $('note-list'),
     addFolderBtn: $('add-folder-btn'), folderList: $('folder-list'), folderFilterEl: $('folder-filter'),
+    foldersHead: $('folders-head'), foldersToggle: $('folders-toggle'), foldersLabel: $('folders-label'),
     folderSelect: $('folder-select'),
     exportBtn: $('export-btn'), exportIc: $('export-ic'), count: $('note-count'),
     userChip: $('user-chip'), userAvatar: $('user-avatar'), userNameEl: $('user-name'), adminBadge: $('admin-badge'),
@@ -476,6 +480,7 @@
     fontCtl: $('font-ctl'), fontMinus: $('font-minus'), fontPlus: $('font-plus'), fontReset: $('font-reset'),
     shareBtn: $('share-btn'), shareModal: $('share-modal'), shareExpl: $('share-expl'),
     shareRow: $('share-row'), shareLink: $('share-link'), shareCopy: $('share-copy'),
+    shareQrRow: $('share-qr-row'), shareQr: $('share-qr'),
     shareCreate: $('share-create'), shareRevoke: $('share-revoke'), shareClose: $('share-close'),
     viewShare: $('view-share'), shareLogo: $('share-logo'), shareTitle: $('share-title'),
     shareMeta: $('share-meta'), shareContent: $('share-content'), shareError: $('share-error'),
@@ -905,6 +910,23 @@
     if (ui.folderList.querySelector('.folder-input')) return; // one editor at a time
     startFolderEdit({ mode: 'create' });
   });
+
+  /* ---------- fold / unfold the folder list (remembered per browser) ---------- */
+
+  function applyFoldersCollapsed() {
+    ui.foldersHead.classList.toggle('collapsed', state.foldersCollapsed);
+    ui.foldersToggle.setAttribute('aria-expanded', String(!state.foldersCollapsed));
+  }
+
+  function toggleFolders() {
+    state.foldersCollapsed = !state.foldersCollapsed;
+    localStorage.setItem('foldersCollapsed', state.foldersCollapsed ? '1' : '0');
+    applyFoldersCollapsed();
+  }
+
+  ui.foldersToggle.addEventListener('click', toggleFolders);
+  ui.foldersLabel.addEventListener('click', toggleFolders);
+  applyFoldersCollapsed();
 
   function setFolderFilter(id) {
     state.folderFilter = id;
@@ -2244,7 +2266,14 @@
     ui.shareRow.classList.toggle('hidden', !note.share);
     ui.shareCreate.classList.toggle('hidden', !!note.share);
     ui.shareRevoke.classList.toggle('hidden', !note.share);
-    ui.shareLink.value = note.share ? `${location.origin}/share/${note.share.token}` : '';
+    ui.shareLink.value = note.share ? `${state.publicBaseUrl || location.origin}/share/${note.share.token}` : '';
+    if (note.share) {
+      ui.shareQr.src = `/share/${note.share.token}/qr.svg`;
+      ui.shareQrRow.classList.remove('hidden');
+    } else {
+      ui.shareQr.removeAttribute('src');
+      ui.shareQrRow.classList.add('hidden');
+    }
   }
 
   function closeShareModal() {
@@ -2259,6 +2288,11 @@
     if (note.share) { ui.shareLink.focus(); ui.shareLink.select(); }
   });
   ui.shareClose.addEventListener('click', closeShareModal);
+  // An old server (or a disabled encoder) has no QR endpoint: hide the row.
+  ui.shareQr.onerror = () => {
+    ui.shareQr.removeAttribute('src');
+    ui.shareQrRow.classList.add('hidden');
+  };
   ui.shareModal.addEventListener('click', (e) => {
     if (e.target === ui.shareModal) closeShareModal();
   });
@@ -2414,6 +2448,7 @@
     ui.searchIcon.innerHTML = ICONS.search(16);
     ui.newIc.innerHTML = ICONS.plus();
     ui.addFolderBtn.innerHTML = ICONS.plus(14);
+    ui.foldersToggle.innerHTML = ICONS.chevron();
     ui.logoutBtn.innerHTML = ICONS.logout();
     ui.menuBtn.innerHTML = ICONS.menu(20);
     ui.delBtn.innerHTML = ICONS.trash();
@@ -2445,6 +2480,7 @@
       const s = await api('/api/session');
       state.registrationOpen = s.registrationOpen !== false;
       if (Number.isFinite(s.trashRetentionDays)) state.trashRetentionDays = s.trashRetentionDays;
+      state.publicBaseUrl = typeof s.publicBaseUrl === 'string' ? s.publicBaseUrl : null;
       if (s.needsSetup) showAuth('setup');
       else if (s.authenticated) {
         state.user = s.user;
