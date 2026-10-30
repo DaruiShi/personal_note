@@ -125,6 +125,19 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
     var shareQrEnabled by mutableStateOf(false)
         private set
 
+    /* wikilink index over the live notes (rebuilt on list changes,
+       updated for one note on save — never per keystroke). */
+    var linkIndex by mutableStateOf(NotesLinks.LinkIndex())
+        private set
+
+    private fun rebuildLinkIndex() {
+        linkIndex = NotesLinks.buildLinkIndex(notes)
+    }
+
+    private fun updateLinkIndex(note: Note) {
+        linkIndex = NotesLinks.updateNote(linkIndex, note)
+    }
+
     init {
         viewModelScope.launch { boot() }
     }
@@ -258,6 +271,7 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
             store.clearAccountData()
             user = null
             notes = emptyList()
+            linkIndex = NotesLinks.LinkIndex()
             folders = emptyList()
             selectedFolderId = null
             offline = false
@@ -271,6 +285,7 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
             store.clearAccountData()
             user = null
             notes = emptyList()
+            linkIndex = NotesLinks.LinkIndex()
             folders = emptyList()
             selectedFolderId = null
             offline = false
@@ -303,6 +318,7 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
                 store.clearAccountData()
                 user = null
                 notes = emptyList()
+            linkIndex = NotesLinks.LinkIndex()
                 backStack = listOf(Screen.Login)
                 postMessage("Account deleted")
             } catch (e: Exception) {
@@ -324,6 +340,7 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
                 val list = api.listNotes()
                 val local = notes.filter { it.isLocal }
                 notes = sortNotes(list + local)
+                rebuildLinkIndex()
                 store.cachedNotes = notes
                 offline = false
                 try {
@@ -527,6 +544,7 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
         }
         store.pendingNotes = notes.filter { it.isLocal }
         store.cachedNotes = notes
+        rebuildLinkIndex()
     }
 
     private fun sortNotes(list: List<Note>): List<Note> =
@@ -537,12 +555,14 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
             val note = notes.firstOrNull { it.id == id } ?: return@launch
             if (note.isLocal) {
                 notes = notes.filterNot { it.id == id }
+                rebuildLinkIndex()
                 store.pendingNotes = notes.filter { it.isLocal }
                 return@launch
             }
             try {
                 api.deleteNote(id)
                 notes = notes.filterNot { it.id == id }
+                rebuildLinkIndex()
                 store.cachedNotes = notes
                 postMessage("Note moved to trash")
             } catch (e: ApiException) {
@@ -571,11 +591,11 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
 
     /* ---------------------------------------------------------- editor */
 
-    fun openEditor(id: String) {
+    fun openEditor(id: String, startInEdit: Boolean = false) {
         val note = if (id == "new") null else notes.firstOrNull { it.id == id }
         editingId = id
         conflict = null
-        editStartInPreview = note != null
+        editStartInPreview = note != null && !startInEdit
         pendingDraftFolderId = null
         editTitle = note?.title ?: ""
         editContent = note?.content ?: ""
@@ -625,6 +645,75 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
     /** The live OkHttp client (shares cookies + trust-all TLS). */
     fun okHttpClient() = api.httpClient()
 
+    /* --------------------------------------- wikilinks + daily notes */
+
+    /** Resolve a wikilink target to a note id, or null when nothing matches. */
+    fun resolveWikilink(target: String): String? =
+        NotesLinks.resolveTitle(linkIndex, target)
+
+    /**
+     * Open the note a wikilink points at; when no note has that title,
+     * [onMissing] runs so the UI can offer creating it.
+     */
+    fun openWikilink(target: String, onMissing: () -> Unit) {
+        val id = NotesLinks.resolveTitle(linkIndex, target)
+        if (id != null) openEditor(id) else onMissing()
+    }
+
+    /** Create a note with this title (empty body) and open it for writing. */
+    fun createAndOpenNote(title: String) {
+        viewModelScope.launch {
+            autosaveNow()
+            try {
+                val created = api.createNote(
+                    title, "", emptyList(), false,
+                    folderId = selectedFolderId?.takeIf { it.isNotEmpty() },
+                )
+                notes = sortNotes(listOf(created) + notes)
+                updateLinkIndex(created)
+                store.cachedNotes = notes
+                openEditor(created.id, startInEdit = true)
+            } catch (e: Exception) {
+                postMessage("Couldn't create note — ${Api.describeError(e)}")
+            }
+        }
+    }
+
+    /**
+     * Open (or create) the daily note titled [key] (YYYY-MM-DD). The
+     * duplicate guard keeps the older note when two creations race a
+     * double-tap: the loser is deleted again and the survivor opens.
+     */
+    fun openDailyNote(key: String) {
+        if (key.isEmpty()) return
+        viewModelScope.launch {
+            autosaveNow()
+            val k = NotesLinks.titleKey(key)
+            notes.firstOrNull { NotesLinks.titleKey(it.title) == k }?.let {
+                openEditor(it.id)
+                return@launch
+            }
+            try {
+                val created = api.createNote(
+                    key, "", emptyList(), false,
+                    folderId = selectedFolderId?.takeIf { it.isNotEmpty() },
+                )
+                val dup = notes.firstOrNull { NotesLinks.titleKey(it.title) == k }
+                if (dup != null) {
+                    try { api.deleteNote(created.id) } catch (e: Exception) { /* already gone */ }
+                    openEditor(dup.id)
+                    return@launch
+                }
+                notes = sortNotes(listOf(created) + notes)
+                updateLinkIndex(created)
+                store.cachedNotes = notes
+                openEditor(created.id, startInEdit = true)
+            } catch (e: Exception) {
+                postMessage("Couldn't create daily note — ${Api.describeError(e)}")
+            }
+        }
+    }
+
     /** Normalized current server base URL ("" when unset). */
     val serverBase: String
         get() = Api.normalizeBaseUrl(store.serverUrl)
@@ -661,6 +750,7 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
                     pendingDraftFolderId = null
                     if (backStack.lastOrNull() == Screen.Edit) replaceTop(Screen.Edit)
                     notes = sortNotes(notes.filterNot { it.id == id } + created)
+                    rebuildLinkIndex() // the old draft id left the list
                 } else {
                     val current = notes.firstOrNull { it.id == id }
                     val updated = api.updateNote(
@@ -670,6 +760,7 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
                     )
                     pendingDraftFolderId = null
                     notes = sortNotes(notes.map { if (it.id == id) updated else it })
+                    updateLinkIndex(updated) // incremental: no full rescan per save
                 }
                 lastSavedSnapshot = snap
                 editStatus = EditStatus.Saved(System.currentTimeMillis())
@@ -708,6 +799,7 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
         editingId = id
         if (originalId == "new" && backStack.lastOrNull() == Screen.Edit) replaceTop(Screen.Edit)
         notes = sortNotes((notes.filterNot { it.id == id || it.id == originalId }) + draft)
+        rebuildLinkIndex()
         store.pendingNotes = notes.filter { it.isLocal }
         lastSavedSnapshot = snap
         editStatus = EditStatus.Pending(reason)
@@ -741,6 +833,7 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
             editStatus = EditStatus.Saved(server.updatedAt)
         }
         notes = sortNotes(notes.map { if (it.id == server.id) server else it })
+        updateLinkIndex(server)
         store.cachedNotes = notes
     }
 
@@ -760,6 +853,7 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
                 )
                 pendingDraftFolderId = null
                 notes = sortNotes(notes.map { if (it.id == c.noteId) updated else it })
+                updateLinkIndex(updated)
                 lastSavedSnapshot = snap
                 editStatus = EditStatus.Saved(System.currentTimeMillis())
                 store.cachedNotes = notes
@@ -794,6 +888,7 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
                     folderId = pendingDraftFolderId ?: c.server.folderId,
                 )
                 notes = sortNotes(notes + copy)
+                updateLinkIndex(copy)
                 store.cachedNotes = notes
             } catch (e: Exception) {
                 postMessage("Couldn't create the copy — ${Api.describeError(e)}")

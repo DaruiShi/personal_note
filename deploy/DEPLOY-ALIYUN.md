@@ -194,6 +194,13 @@ ssh root@YOUR_SERVER_IP "sudo tar xzf /tmp/notes.tgz -C /opt/notes && sudo /opt/
 `deploy/update.sh` (ships with the app) backs up the data file, fixes
 ownership, restarts the service, and health-checks it.
 
+If you use the optional `config.json` (MiniMax key for timeline
+Paste & parse), it is NOT inside the tarball — copy it once to
+`/opt/notes/config.json` and keep it `0600` (`sudo chmod 600`, owned by
+`notes:notes`). The service runs with `ProtectSystem=strict`, but the file
+is read-only to it — it lives next to `server.js`, outside `data/`, so
+`ReadWritePaths` needs no change and updates must not delete it.
+
 Manual equivalent on the server:
 
 ```bash

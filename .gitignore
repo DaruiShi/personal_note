@@ -7,6 +7,11 @@ android-app/local.properties
 .env
 .env.*
 
+# local config with the MiniMax API key (config.example.json is the tracked template)
+config.json
+config.*.json
+!config.example.json
+
 # release artifacts (188 MB of APKs; distribute via releases instead)
 *.apk
 

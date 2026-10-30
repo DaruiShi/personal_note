@@ -30,6 +30,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AdminPanelSettings
+import androidx.compose.material.icons.filled.Event
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Close
@@ -83,6 +84,7 @@ import kotlinx.coroutines.launch
 import site.funshare.notes.AppViewModel
 import site.funshare.notes.Folder
 import site.funshare.notes.Note
+import site.funshare.notes.NotesLinks
 import site.funshare.notes.Screen
 
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
@@ -223,6 +225,13 @@ fun NotesScreen(vm: AppViewModel) {
                                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
+                        }
+                        IconButton(onClick = { vm.openDailyNote(NotesLinks.localDateKey(java.util.Date())) }) {
+                            Icon(
+                                Icons.Filled.Event,
+                                contentDescription = "Today's note",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
                         IconButton(onClick = { vm.navigate(Screen.Settings) }) {
                             Icon(

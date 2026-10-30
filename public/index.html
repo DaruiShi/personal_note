@@ -9,6 +9,8 @@
   <link rel="icon" href="/icon.svg">
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="stylesheet" href="/style.css">
+  <script src="/links.js" defer></script>
+  <script src="/timeline.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
@@ -44,6 +46,12 @@
       </div>
 
       <button class="new-note-btn" id="new-note-btn"><span class="ic" id="new-note-ic"></span>New note</button>
+      <button class="new-note-btn ghost" id="today-btn" type="button" aria-label="Open today's note">
+        <span class="ic" id="today-ic"></span><span id="today-label">Today</span>
+      </button>
+      <button class="new-note-btn ghost" id="new-timeline-btn" type="button" aria-label="New timeline note">
+        <span class="ic" id="new-timeline-ic"></span><span>Timeline</span>
+      </button>
 
       <div class="search-box">
         <span id="search-icon"></span>
@@ -106,6 +114,12 @@
               <button class="icon-btn danger" id="delete-btn" title="Delete note" aria-label="Delete note"></button>
             </div>
           </div>
+          <div class="day-nav hidden" id="day-nav">
+            <button class="icon-btn" id="day-prev" type="button" aria-label="Previous day"></button>
+            <span class="day-label" id="day-label"></span>
+            <button class="icon-btn" id="day-next" type="button" aria-label="Next day"></button>
+            <button class="btn sm" id="day-today" type="button">Today</button>
+          </div>
           <div class="tag-editor">
             <select id="folder-select" class="folder-select" title="Folder" aria-label="Folder"></select>
             <div id="tag-chips" class="tag-chips"></div>
@@ -117,6 +131,17 @@
         <div class="editor-body">
           <textarea id="note-content" placeholder="Start writing&hellip; Markdown is supported." spellcheck="true"></textarea>
           <div id="preview" class="preview hidden"></div>
+          <div id="timeline" class="timeline hidden">
+            <div class="tl-bar">
+              <button class="icon-btn" id="tl-prev" type="button" aria-label="Previous date"></button>
+              <button class="tl-date" id="tl-date" type="button" title="Jump to a date"></button>
+              <button class="icon-btn" id="tl-next" type="button" aria-label="Next date"></button>
+              <button class="btn sm" id="tl-today" type="button">Today</button>
+              <button class="btn sm" id="tl-parse" type="button">Paste &amp; parse</button>
+              <input type="date" id="tl-jump" class="tl-jump" aria-label="Jump to date">
+            </div>
+            <div class="tl-scroller" id="tl-scroller" tabindex="0" aria-label="Timeline dates"></div>
+          </div>
         </div>
 
         <div class="status-bar">
@@ -247,6 +272,22 @@
       </div>
       <div class="modal-actions" id="history-close-row">
         <button class="btn" id="history-close" type="button">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ======================= timeline paste & parse modal ======================= -->
+  <div class="modal-backdrop hidden" id="tl-parse-modal">
+    <div class="modal tl-parse-modal" role="dialog" aria-modal="true">
+      <h3>Paste &amp; parse</h3>
+      <p class="tl-privacy">Your text is sent to MiniMax to extract dates. Nothing else from this note is sent.</p>
+      <textarea id="tl-parse-text" class="tl-parse-text" rows="5" placeholder="Paste notes here — one thought per line, dates anywhere in a line&hellip;"></textarea>
+      <p class="tl-notice hidden" id="tl-parse-notice"></p>
+      <div class="tl-results hidden" id="tl-parse-results"></div>
+      <div class="modal-actions">
+        <button class="btn" id="tl-parse-close" type="button">Close</button>
+        <button class="btn primary" id="tl-parse-run" type="button">Parse</button>
+        <button class="btn primary hidden" id="tl-parse-confirm" type="button">Add items</button>
       </div>
     </div>
   </div>

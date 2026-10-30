@@ -62,6 +62,35 @@ browser (desktop or phone), and keep your notes private behind a login.
 - Accounts: registration, sign-in, change password, sign out everywhere,
   delete account; admin panel to promote/demote/delete users and toggle
   open registration
+- **Timeline notes** — a second note kind organised by date: it opens on
+  today, scrolls horizontally between dates, and holds a list of items per
+  date that can be added, edited, moved, and deleted in place. **Paste &
+  parse** turns pasted text into dated items (via MiniMax when configured,
+  otherwise a basic local parser) for you to confirm.
+
+### Note types
+
+Notes are either plain **markdown** notes (the default; `kind` absent) or
+**timeline** notes (`kind: "timeline"`, items in `note.timeline.items`). A
+timeline's markdown `content` is a read-only mirror the server derives from
+its items — every save regenerates it, so sharing, trash, export, and the
+Android app (which shows the mirror read-only and is refused with a clear
+message if it tries to write) all keep working. Up to 5000 items per note,
+each with plain text up to 4000 characters on a `YYYY-MM-DD` date.
+
+### Wikilinks and daily notes
+
+- **Wikilinks**: `[[Note title]]` (or `[[Note title|label]]` for custom link
+  text) renders as a link to that note — titles match ignoring case and
+  whitespace. Clicking a link to a note that doesn't exist offers to create
+  it. Links inside code spans or fenced code blocks stay literal.
+- **Backlinks**: a note's preview ends with a "Linked from" section listing
+  every other note that wikilinks to it, each with a snippet around the
+  link, plus a line of this note's own outgoing links.
+- **Daily notes**: the **Today** button in the sidebar opens (or creates)
+  a note titled with today's date in `YYYY-MM-DD` form, and a date bar
+  above such notes steps to the previous/next day. Daily notes are plain
+  notes — no special storage, tags, or folders.
 
 ## Run locally
 
@@ -151,11 +180,50 @@ systemd unit (and restart it) so login rate limiting sees real client IPs.
 | `DATA_DIR`    | `./data`  | Directory holding `notes.json`                   |
 | `TRUST_PROXY` | off       | `1` = honor `X-Forwarded-For` (behind a proxy)   |
 | `PUBLIC_BASE_URL` | unset | Public origin (`https://notes.example.com`) used in share-page `og:url`/`canonical` tags and QR codes; unset = derive from the request |
+| `CONFIG_FILE` | `./config.json` | Path to the optional config file (see below) |
 
 **Link previews:** share pages build their Open Graph tags from the request
 host by default. Behind a reverse proxy, set `PUBLIC_BASE_URL` (and
 `TRUST_PROXY=1`) so previews and QR codes always carry your public domain
 instead of `127.0.0.1:3000`.
+
+## config.json (optional — AI date parsing for timelines)
+
+Timeline notes work without any configuration. To let **Paste & parse**
+extract dates with an LLM, copy `config.example.json` to `config.json`
+next to `server.js`, put your MiniMax API key in `llm.apiKey`, and restart:
+
+```json
+{
+  "llm": {
+    "enabled": true,
+    "baseUrl": "https://api.minimax.io/v1",
+    "model": "MiniMax-M3.1-Flash",
+    "apiKey": "YOUR KEY",
+    "timeoutMs": 25000,
+    "maxInputChars": 20000,
+    "maxItemsPerRequest": 200,
+    "requestsPerHourPerUser": 30
+  }
+}
+```
+
+- `chmod 600 config.json` — it holds a secret. The file is read once at
+  startup and is gitignored; `config.example.json` is the tracked template.
+- `baseUrl` must match the platform the key belongs to: international keys
+  use `https://api.minimax.io/v1`; keys from the mainland console
+  (platform.minimaxi.com) use `https://api.minimaxi.com/v1` — a key on the
+  wrong platform fails with 401.
+- The `thinking` request parameter is omitted by default (MiniMax-M3.1-Flash
+  requires adaptive thinking and rejects `{"type":"disabled"}` with a 400).
+  Set `"thinking": {...}` in the config only if your model needs it pinned.
+- **Privacy:** when you use Paste & parse, the pasted text is sent to
+  MiniMax to extract dates; nothing else from the note is sent.
+- Each account is limited to `requestsPerHourPerUser` parses per hour
+  (in-memory; the counter resets on restart).
+- Without the file, an empty key, or `enabled: false`, the server starts
+  normally and the parse button falls back to a basic local parser
+  (leading `YYYY-MM-DD`, `M/D`, `M月D日`, `今天/昨天/前天`, `星期X` dates).
 
 ## Backups & recovery
 
@@ -217,7 +285,7 @@ test/                     node:test suite (npm test)
 ## Android app
 
 A native Android client lives in [`android-app/`](android-app/README.md) —
-the signed APK is `android-app/FunshareNotes-v1.18.apk`. It connects to this
+the signed APK is `android-app/FunshareNotes-v1.19.apk`. It connects to this
 server's JSON API with the same accounts and notes as the website, and its
 server address is configurable on the sign-in screen.
 

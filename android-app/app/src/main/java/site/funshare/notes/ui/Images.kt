@@ -10,6 +10,7 @@ import android.os.Build
 import android.provider.OpenableColumns
 import android.view.View
 import android.widget.Toast
+import site.funshare.notes.NotesLinks
 import androidx.core.content.FileProvider
 import androidx.exifinterface.media.ExifInterface
 import kotlinx.coroutines.Dispatchers
@@ -205,7 +206,14 @@ fun mimeForFileName(name: String): String = when (name.substringAfterLast('.', "
 }
 
 /**
- * Resolve a markdown link tapped in the preview. Server uploads (relative,
+ * Taps on wikilinks in a preview: (target, missingAtRenderTime). Set by the
+ * screen showing the preview; null leaves wikilink taps inert.
+ */
+var previewWikilinkHandler: ((target: String, missing: Boolean) -> Unit)? = null
+
+/**
+ * Resolve a markdown link tapped in the preview. Wikilinks route back into
+ * the app (note navigation / create dialog); server uploads (relative,
  * public-domain or direct-server forms) are downloaded through the app's
  * authenticated client — via [serverBase], the address the session belongs
  * to — and handed to a viewer; everything else opens as a normal intent.
@@ -217,6 +225,12 @@ fun openPreviewLink(
     serverBase: String,
     publicBase: String,
 ) {
+    if (NotesLinks.isWikilinkUrl(link)) {
+        val missing = link.startsWith(NotesLinks.WIKILINK_MISSING_SCHEME)
+        val target = NotesLinks.wikilinkTarget(link)
+        if (target != null) previewWikilinkHandler?.invoke(target, missing)
+        return
+    }
     val context = view.context
     fun external(url: String) {
         try {

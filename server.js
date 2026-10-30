@@ -16,10 +16,13 @@
  *   HOST        listen address                  (default 0.0.0.0)
  *   DATA_DIR    data directory                  (default ./data)
  *   TRUST_PROXY set to 1 when behind nginx/Caddy so X-Forwarded-For is honored
+ *   CONFIG_FILE optional config.json path       (default ./config.json; holds
+ *               the MiniMax API key for timeline "Paste & parse")
  */
 'use strict';
 
 const http = require('http');
+const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
 const crypto = require('crypto');
@@ -34,6 +37,10 @@ try {
   console.warn(`Warning: QR encoder unavailable (${err.message}); share-link QR codes stay disabled.`);
 }
 
+// Timeline-note pure logic and the MiniMax client (both stdlib only).
+const timeline = require('./lib/timeline');
+const llm = require('./lib/llm');
+
 /* ------------------------------------------------------------------ config */
 
 const PORT = Number(process.env.PORT) || 3000;
@@ -42,6 +49,20 @@ const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const DB_FILE = path.join(DATA_DIR, 'notes.json');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const TRUST_PROXY = process.env.TRUST_PROXY === '1';
+const CONFIG_FILE = process.env.CONFIG_FILE || path.join(__dirname, 'config.json');
+
+// Optional LLM config for timeline "Paste & parse". Read once at startup,
+// never re-read per request; a missing/unparsable/incomplete file just
+// leaves the feature off (the server must still boot). The API key never
+// appears in logs, responses, or error messages.
+let llmConfig = null;
+try {
+  llmConfig = llm.configure(JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')));
+} catch {
+  llmConfig = null;
+}
+if (llmConfig) console.log(`[${new Date().toISOString()}]`, 'LLM parsing enabled', JSON.stringify(llm.describeConfig()));
+else console.log(`[${new Date().toISOString()}]`, 'LLM parsing disabled - config.json missing or incomplete');
 
 // Public origin for absolute share URLs (og:url, og:image, QR codes).
 // Optional: when unset, derived per request from X-Forwarded-Proto / Host —
@@ -246,9 +267,12 @@ function historyPath(noteId) {
 
 // Snapshot of a note state, tagged with the note's rev at capture time.
 // For "rejected" entries, `state` is the losing client payload instead.
+// Timeline notes snapshot their kind and items (as `noteKind` — `kind` is
+// this entry's type) so a restore brings back the items, not just the
+// markdown mirror.
 function historyEntry(note, kind, state = null) {
   const s = state || note;
-  return {
+  const e = {
     ts: Date.now(),
     rev: note.rev,
     kind,
@@ -260,6 +284,11 @@ function historyEntry(note, kind, state = null) {
     bytes: Buffer.byteLength(String(s.content || ''), 'utf8'),
     hash: sha256Hex(String(s.content || '')),
   };
+  if (s.kind === timeline.TIMELINE_KIND) {
+    e.noteKind = timeline.TIMELINE_KIND;
+    e.timeline = { items: Array.isArray(s.timeline && s.timeline.items) ? s.timeline.items : [] };
+  }
+  return e;
 }
 
 function parseHistoryLine(line) {
@@ -549,6 +578,17 @@ function getSession(req) {
 /* Brute-force protection, shared by login and register. */
 const loginFailures = new Map();
 
+/* Timeline "Paste & parse": per-user sliding-window limiter (in-memory like
+   the login throttle — resets on restart) plus a global in-flight cap. */
+const parseHits = new Map(); // userId -> [ts, ...] within the last hour
+let parseInFlight = 0;
+
+function localTodayKey() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
 function checkLock(ip) {
   const f = loginFailures.get(ip);
   return f && f.until > Date.now() ? Math.ceil((f.until - Date.now()) / 60000) : 0;
@@ -639,8 +679,8 @@ function readBody(req, limit = BODY_LIMIT) {
   });
 }
 
-async function readJson(req) {
-  const raw = (await readBody(req)).toString('utf8');
+async function readJson(req, limit = BODY_LIMIT) {
+  const raw = (await readBody(req, limit)).toString('utf8');
   if (!raw) return {};
   try {
     const parsed = JSON.parse(raw);
@@ -663,7 +703,7 @@ async function handleApi(req, res, pathname) {
       authenticated: !!user,
       user: user ? publicUser(user) : null,
       registrationOpen: db.settings.registrationOpen,
-      features: { trash: true, history: true, conflicts: true, qr: qr != null },
+      features: { trash: true, history: true, conflicts: true, qr: qr != null, timeline: true, timelineParse: llmConfig != null },
       trashRetentionDays: db.settings.trashRetentionDays,
       publicBaseUrl,
     });
@@ -912,9 +952,23 @@ async function handleApi(req, res, pathname) {
       return sendJson(res, 400, { error: 'Note limit reached' });
     }
     const body = await readJson(req);
+    if ('kind' in body && body.kind !== 'markdown' && body.kind !== timeline.TIMELINE_KIND) {
+      return sendJson(res, 400, { error: 'kind must be "markdown" or "timeline"', code: 'invalid_kind' });
+    }
     const clean = sanitizeNote(body);
     const now = Date.now();
     const note = { id: crypto.randomUUID(), userId: user.id, folderId: resolveFolderId(body.folderId, user), ...clean, createdAt: now, updatedAt: now, rev: 1, deletedAt: null };
+    if (body.kind === timeline.TIMELINE_KIND) {
+      // A timeline's content is always the derived mirror; client content
+      // is ignored. An absent timeline starts empty.
+      const norm = timeline.normalizeTimeline(body.timeline || { items: [] });
+      if (!norm.ok) {
+        return sendJson(res, 400, { error: norm.message, code: norm.code, ...(norm.index != null ? { index: norm.index } : {}) });
+      }
+      note.kind = timeline.TIMELINE_KIND;
+      note.timeline = { items: norm.items };
+      note.content = norm.markdown;
+    }
     db.notes.push(note);
     saveDb();
     return sendJson(res, 201, { note });
@@ -924,11 +978,45 @@ async function handleApi(req, res, pathname) {
   if (m) {
     const note = db.notes.find((n) => n.id === m[1] && n.userId === user.id);
     if (!note) return sendJson(res, 404, { error: 'Note not found' });
+    if (method === 'GET') {
+      if (note.deletedAt != null) return sendJson(res, 404, { error: 'Note not found' });
+      return sendJson(res, 200, { note });
+    }
     if (method === 'PUT') {
       const body = await readJson(req);
       if (note.deletedAt != null) {
         return sendJson(res, 409, { error: 'This note is in the trash', code: 'trashed', note });
       }
+      /* Timeline write rules. A client that does not know about timelines
+         (the Android app) would replace the mirror text and desync it from
+         the items — refuse instead, before any history entry is written. */
+      const noteIsTimeline = note.kind === timeline.TIMELINE_KIND;
+      if (noteIsTimeline && !('timeline' in body)) {
+        return sendJson(res, 409, { error: 'This timeline note can only be edited in the web app', code: 'timeline' });
+      }
+      if ('kind' in body && body.kind !== 'markdown' && body.kind !== timeline.TIMELINE_KIND) {
+        return sendJson(res, 400, { error: 'kind must be "markdown" or "timeline"', code: 'invalid_kind' });
+      }
+      if (noteIsTimeline && 'timeline' in body && body.timeline == null && body.kind !== 'markdown') {
+        return sendJson(res, 400, { error: 'timeline must be { items: [...] }; send kind "markdown" + timeline null to convert', code: 'invalid_timeline' });
+      }
+      if (!noteIsTimeline && body.kind === timeline.TIMELINE_KIND && 'timeline' in body && body.timeline == null) {
+        return sendJson(res, 400, { error: 'Converting a note to a timeline requires timeline: { items: [...] }', code: 'invalid_timeline' });
+      }
+      if (body.kind === 'markdown' && noteIsTimeline && 'timeline' in body && body.timeline != null) {
+        return sendJson(res, 409, { error: 'Converting a timeline to markdown requires timeline: null', code: 'timeline' });
+      }
+      if (body.kind === timeline.TIMELINE_KIND && !noteIsTimeline && !('timeline' in body)) {
+        return sendJson(res, 400, { error: 'Converting a note to a timeline requires a timeline field', code: 'invalid_kind' });
+      }
+      let norm = null; // { items, markdown } when this write carries a timeline
+      if ((noteIsTimeline || body.kind === timeline.TIMELINE_KIND) && body.timeline != null) {
+        norm = timeline.normalizeTimeline(body.timeline);
+        if (!norm.ok) {
+          return sendJson(res, 400, { error: norm.message, code: norm.code, ...(norm.index != null ? { index: norm.index } : {}) });
+        }
+      }
+      const dropTimeline = noteIsTimeline && body.kind === 'markdown' && 'timeline' in body && body.timeline == null;
       // Concurrency: a body without rev is a legacy client (last-write-wins);
       // a rev that no longer matches lost a race — keep the losing payload in
       // history, never merge. The check runs immediately before the mutation
@@ -938,12 +1026,22 @@ async function handleApi(req, res, pathname) {
           return sendJson(res, 400, { error: 'rev must be a number' });
         }
         if (body.rev !== note.rev) {
-          await appendHistory(note.id, historyEntry(note, 'rejected', { ...sanitizeNote(body), folderId: resolveFolderId(body.folderId, user) }));
+          await appendHistory(note.id, historyEntry(note, 'rejected', { ...sanitizeNote(body), kind: body.kind, timeline: body.timeline, folderId: resolveFolderId(body.folderId, user) }));
           return sendJson(res, 409, { error: 'This note was changed on another device', code: 'conflict', note });
         }
       }
       const entry = historyEntry(note, 'edit'); // the state before this update
       Object.assign(note, sanitizeNote(body), { updatedAt: Date.now() });
+      if (norm) {
+        // The mirror is always derived server-side; any client-supplied
+        // content for a timeline note is ignored.
+        note.kind = timeline.TIMELINE_KIND;
+        note.timeline = { items: norm.items };
+        note.content = norm.markdown;
+      } else if (dropTimeline) {
+        delete note.kind;
+        delete note.timeline;
+      }
       // Only touch the folder when the client sends the field at all —
       // older clients (Android app) that don't know about folders must not
       // accidentally unfile notes.
@@ -1056,6 +1154,58 @@ async function handleApi(req, res, pathname) {
     return sendJson(res, 200, { purged: trashed.length });
   }
 
+  /* ----------------------------------------------------- timeline parse */
+
+  // Sends the pasted text (and nothing else) to the configured LLM and gets
+  // dated items back. Disabled without config; rate-limited per user.
+  if (pathname === '/api/timeline/parse' && method === 'POST') {
+    if (!llmConfig) {
+      return sendJson(res, 503, { error: 'AI parsing is not configured on this server', code: 'llm_not_configured' });
+    }
+    if (parseInFlight >= 2) {
+      return sendJson(res, 503, { error: 'The AI parser is busy — try again in a moment', code: 'busy' });
+    }
+    const now = Date.now();
+    const hits = (parseHits.get(user.id) || []).filter((t) => now - t < 3600 * 1000);
+    if (hits.length >= llmConfig.requestsPerHourPerUser) {
+      parseHits.set(user.id, hits);
+      const retryAfter = Math.max(1, Math.ceil((hits[0] + 3600 * 1000 - now) / 60000));
+      return sendJson(res, 429, { error: 'Too many parses this hour — try again later', code: 'too_many_requests', retryAfter });
+    }
+    const body = await readJson(req, 64 * 1024);
+    const text = typeof body.text === 'string' ? body.text : '';
+    if (!text.trim()) {
+      return sendJson(res, 400, { error: 'Nothing to parse', code: 'empty_text' });
+    }
+    if (text.length > llmConfig.maxInputChars) {
+      return sendJson(res, 413, { error: `Pasted text is longer than ${llmConfig.maxInputChars} characters`, code: 'input_too_large' });
+    }
+    const today = timeline.isDateKey(body.today) ? body.today : localTodayKey();
+    const [ty, tm, td] = today.split('-').map(Number);
+    const weekday = new Date(ty, tm - 1, td).toLocaleDateString('en-US', { weekday: 'long' });
+    hits.push(now);
+    parseHits.set(user.id, hits);
+    parseInFlight += 1;
+    const t0 = Date.now();
+    try {
+      const { items } = await llm.parseTimelineText({ text, today, weekday });
+      log(`timeline/parse user=${user.name} items=${items.length} ms=${Date.now() - t0} ok=1`);
+      return sendJson(res, 200, { items, model: llmConfig.model });
+    } catch (e) {
+      // One line per call — user, count, duration, outcome; never the text.
+      log(`timeline/parse user=${user.name} items=0 ms=${Date.now() - t0} ok=0 code=${e.code || 'llm_failed'}`);
+      const code = ['llm_timeout', 'llm_unparsable', 'llm_rate_limited'].includes(e.code) ? e.code : 'llm_failed';
+      const status = code === 'llm_timeout' ? 504 : code === 'llm_rate_limited' ? 429 : 502;
+      return sendJson(res, status, {
+        error: e.message || 'The AI request failed',
+        code,
+        ...(status === 429 ? { retryAfter: 60 } : {}),
+      });
+    } finally {
+      parseInFlight -= 1;
+    }
+  }
+
   /* ------------------------------------------------------------ history */
 
   const hl = pathname.match(/^\/api\/notes\/([^/]+)\/history$/);
@@ -1104,6 +1254,18 @@ async function handleApi(req, res, pathname) {
     note.tags = sanitizeTags(revision.tags);
     note.pinned = revision.pinned === true;
     note.folderId = resolveFolderId(revision.folderId, user);
+    if (revision.noteKind === timeline.TIMELINE_KIND && revision.timeline) {
+      // Restoring a timeline revision restores the items; the mirror is
+      // regenerated. Old sidecars pre-dating timelines have no noteKind
+      // and restore as plain markdown, which is what they were.
+      const norm = timeline.normalizeTimeline(revision.timeline);
+      note.kind = timeline.TIMELINE_KIND;
+      note.timeline = { items: norm.ok ? norm.items : [] };
+      note.content = norm.ok ? norm.markdown : '';
+    } else {
+      delete note.kind;
+      delete note.timeline;
+    }
     note.updatedAt = Date.now();
     note.rev += 1;
     saveDb();

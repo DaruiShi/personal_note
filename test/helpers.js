@@ -13,7 +13,17 @@ async function startServer(opts = {}) {
   const dataDir = opts.dataDir || await fsp.mkdtemp(path.join(os.tmpdir(), 'notes-test-'));
   const port = 20000 + Math.floor(Math.random() * 20000);
   const child = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
-    env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', DATA_DIR: dataDir, ...(opts.env || {}) },
+    // CONFIG_FILE defaults to a missing path so a developer's real
+    // ./config.json (with a live API key) never leaks into tests; suites
+    // that need one pass their own via opts.env.
+    env: {
+      ...process.env,
+      PORT: String(port),
+      HOST: '127.0.0.1',
+      DATA_DIR: dataDir,
+      CONFIG_FILE: path.join(dataDir, 'config-absent.json'),
+      ...(opts.env || {}),
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   child.stderr.on('data', (d) => process.stderr.write(`[server] ${d}`));

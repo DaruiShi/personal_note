@@ -14,6 +14,8 @@ import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -41,6 +43,8 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.FormatBold
 import androidx.compose.material.icons.filled.FormatItalic
 import androidx.compose.material.icons.filled.FormatListBulleted
@@ -98,9 +102,17 @@ import okhttp3.OkHttpClient
 import site.funshare.notes.Api
 import site.funshare.notes.AppViewModel
 import site.funshare.notes.EditStatus
+import site.funshare.notes.NotesLinks
 
 private var cachedMarkwon: Markwon? = null
 private var markwonKey: List<Any>? = null
+
+/** Draws text at ~55% of the body color — the "missing link" treatment. */
+private class MutedTextSpan(private val baseColor: Int) : android.text.style.CharacterStyle() {
+    override fun updateDrawState(tp: android.text.TextPaint) {
+        tp.color = (baseColor and 0x00FFFFFF) or (0x8C shl 24)
+    }
+}
 
 /** Markwon with tables, task lists, images, LaTeX math and server-aware links. */
 internal fun markwon(
@@ -129,6 +141,29 @@ internal fun markwon(
                 override fun configureConfiguration(builder: MarkwonConfiguration.Builder) {
                     builder.linkResolver { view, link ->
                         openPreviewLink(view, link, client, serverBase, publicBase)
+                    }
+                }
+
+                override fun afterSetText(textView: android.widget.TextView) {
+                    // Missing wikilinks render in a muted tone (the dashed
+                    // underline of the web client is not expressible in a
+                    // text paint). Recolor by URL scheme after the render.
+                    val text = textView.text as? android.text.Spannable ?: return
+                    val spans = text.getSpans(
+                        0, text.length,
+                        io.noties.markwon.core.spans.LinkSpan::class.java,
+                    )
+                    for (span in spans) {
+                        if (!span.url.startsWith(NotesLinks.WIKILINK_MISSING_SCHEME)) continue
+                        val start = text.getSpanStart(span)
+                        val end = text.getSpanEnd(span)
+                        if (start < 0 || end <= start) continue
+                        val base = textView.currentTextColor
+                        text.setSpan(
+                            MutedTextSpan(base),
+                            start, end,
+                            android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+                        )
                     }
                 }
             })
@@ -236,6 +271,17 @@ fun EditScreen(vm: AppViewModel) {
     var shareBusy by remember { mutableStateOf(false) }
     var shareUrl by remember { mutableStateOf<String?>(null) }
     var moveOpen by remember { mutableStateOf(false) }
+    var wikilinkCreate by remember { mutableStateOf<String?>(null) }
+
+    /* Preview wikilink taps arrive through the global Markwon link resolver
+       (the renderer is cached app-wide, so the handler is a settable hook). */
+    val openLinkTarget by androidx.compose.runtime.rememberUpdatedState { target: String ->
+        vm.openWikilink(target) { wikilinkCreate = target }
+    }
+    DisposableEffect(Unit) {
+        previewWikilinkHandler = { target, _ -> openLinkTarget(target) }
+        onDispose { previewWikilinkHandler = null }
+    }
 
     /* clipboard: offer to insert a copied image */
     val clipboard = remember { context.getSystemService(ClipboardManager::class.java) }
@@ -389,14 +435,44 @@ fun EditScreen(vm: AppViewModel) {
             )
         },
     ) { padding ->
-        Box(
+        Column(
             Modifier
                 .fillMaxSize()
                 .padding(padding)
                 .imePadding(),
         ) {
+            // Day bar for daily notes — driven purely by the current title,
+            // so renaming to/from a date shows or hides it immediately.
+            val dayKey = remember(vm.editTitle) {
+                if (NotesLinks.isDateTitle(vm.editTitle)) {
+                    NotesLinks.parseDateKey(vm.editTitle.trim())?.let { NotesLinks.localDateKey(it) }
+                } else null
+            }
+            dayKey?.let { key ->
+                DayNavBar(
+                    label = NotesLinks.formatDayLabel(key),
+                    onPrev = { NotesLinks.addDays(key, -1)?.let(vm::openDailyNote) },
+                    onNext = { NotesLinks.addDays(key, 1)?.let(vm::openDailyNote) },
+                    onToday = { vm.openDailyNote(NotesLinks.localDateKey(java.util.Date())) },
+                )
+            }
+            Box(Modifier.weight(1f)) {
             if (preview) {
                 val fontScale = vm.previewFontScale
+                // Wikilinks become markdown links with a private scheme the
+                // link resolver routes back into the app; code stays literal.
+                val wikilinkMarkdown = NotesLinks.toMarkdownLinks(
+                    preprocessLatex(
+                        resolvePreviewUrls(vm.editContent, vm.publicBase, serverBase),
+                    ),
+                ) { vm.resolveWikilink(it) }
+                val noteId = noteKey.takeIf { it != "new" && !it.startsWith("local:") }
+                val backlinks = remember(vm.linkIndex, noteId, vm.notes) {
+                    noteId?.let { NotesLinks.inboundFor(vm.linkIndex, it, vm.notes) } ?: emptyList()
+                }
+                val outTargets = remember(vm.linkIndex, noteId) {
+                    noteId?.let { vm.linkIndex.outbound[it] } ?: emptyList()
+                }
                 Column(
                     Modifier
                         .fillMaxSize()
@@ -412,9 +488,7 @@ fun EditScreen(vm: AppViewModel) {
                         modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
                     )
                     MarkdownText(
-                        markdown = preprocessLatex(
-                            resolvePreviewUrls(vm.editContent, vm.publicBase, serverBase),
-                        ),
+                        markdown = wikilinkMarkdown,
                         client = httpClient,
                         serverBase = serverBase,
                         publicBase = vm.publicBase,
@@ -424,6 +498,20 @@ fun EditScreen(vm: AppViewModel) {
                             .padding(horizontal = 24.dp, vertical = 4.dp)
                             .fillMaxWidth(),
                     )
+                    if (backlinks.isNotEmpty() || outTargets.isNotEmpty()) {
+                        BacklinksSection(
+                            backlinks = backlinks,
+                            outTargets = outTargets,
+                            isResolved = { vm.resolveWikilink(it) != null },
+                            onOpen = { vm.openEditor(it) },
+                            onOpenTarget = { target ->
+                                vm.openWikilink(target) { wikilinkCreate = target }
+                            },
+                            modifier = Modifier
+                                .padding(horizontal = 24.dp, vertical = 8.dp)
+                                .fillMaxWidth(),
+                        )
+                    }
                     Spacer(Modifier.height(48.dp))
                 }
             } else {
@@ -593,6 +681,7 @@ fun EditScreen(vm: AppViewModel) {
                     .align(Alignment.BottomCenter)
                     .padding(bottom = 16.dp),
             )
+            }
         }
     }
 
@@ -669,6 +758,23 @@ fun EditScreen(vm: AppViewModel) {
             vm = vm,
             noteId = vm.editingKey,
             onDismiss = { moveOpen = false },
+        )
+    }
+
+    wikilinkCreate?.let { target ->
+        AlertDialog(
+            onDismissRequest = { wikilinkCreate = null },
+            title = { Text("Create this note?") },
+            text = { Text("No note titled “${target}” exists yet. Create it now?") },
+            confirmButton = {
+                TextButton(onClick = {
+                    wikilinkCreate = null
+                    vm.createAndOpenNote(target)
+                }) { Text("Create") }
+            },
+            dismissButton = {
+                TextButton(onClick = { wikilinkCreate = null }) { Text("Cancel") }
+            },
         )
     }
 
@@ -778,6 +884,126 @@ private fun ShareDialog(
             }
         },
     )
+}
+
+/* ------------------------------------------------- wikilinks + daily notes */
+
+/**
+ * Linked-from section below a note's preview: the outbound line of chips
+ * plus a row per linking note with a snippet around its wikilink.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun BacklinksSection(
+    backlinks: List<NotesLinks.Backlink>,
+    outTargets: List<String>,
+    isResolved: (String) -> Boolean,
+    onOpen: (String) -> Unit,
+    onOpenTarget: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        if (outTargets.isNotEmpty()) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                val resolvedCount = outTargets.count { isResolved(it) }
+                Text(
+                    if (resolvedCount > 0) "Links to $resolvedCount note${if (resolvedCount == 1) "" else "s"}:"
+                    else "Links:",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 6.dp),
+                )
+                for (t in outTargets) {
+                    val resolved = isResolved(t)
+                    Surface(
+                        onClick = { onOpenTarget(t) },
+                        shape = MaterialTheme.shapes.large,
+                        color = if (resolved) MaterialTheme.colorScheme.primaryContainer
+                        else MaterialTheme.colorScheme.surface,
+                        border = if (resolved) null
+                        else androidx.compose.foundation.BorderStroke(
+                            1.dp,
+                            MaterialTheme.colorScheme.outlineVariant,
+                        ),
+                    ) {
+                        Text(
+                            t,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (resolved) MaterialTheme.colorScheme.onPrimaryContainer
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                        )
+                    }
+                }
+            }
+        }
+        if (backlinks.isNotEmpty()) {
+            Text(
+                "Linked from ${backlinks.size}",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            for (b in backlinks) {
+                Surface(
+                    onClick = { onOpen(b.id) },
+                    shape = MaterialTheme.shapes.medium,
+                    color = MaterialTheme.colorScheme.surface,
+                    border = androidx.compose.foundation.BorderStroke(
+                        1.dp,
+                        MaterialTheme.colorScheme.outlineVariant,
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                        Text(
+                            b.title.ifBlank { "Untitled" },
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                        if (b.snippet.isNotEmpty()) {
+                            Text(
+                                b.snippet,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 2,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Prev / label / Today bar shown while a daily note (date title) is open. */
+@Composable
+private fun DayNavBar(
+    label: String,
+    onPrev: () -> Unit,
+    onNext: () -> Unit,
+    onToday: () -> Unit,
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        IconButton(onClick = onPrev) {
+            Icon(Icons.Filled.KeyboardArrowLeft, contentDescription = "Previous day")
+        }
+        Text(
+            label,
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.weight(1f),
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+        )
+        IconButton(onClick = onNext) {
+            Icon(Icons.Filled.KeyboardArrowRight, contentDescription = "Next day")
+        }
+        TextButton(onClick = onToday) { Text("Today") }
+    }
 }
 
 @Composable

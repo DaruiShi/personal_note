@@ -36,6 +36,9 @@
     pen: (s = 26) => svg(`<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>`, s),
     history: (s = 17) => svg(`<circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/>`, s),
     chevron: (s = 14) => svg(`<polyline points="6 9 12 15 18 9"/>`, s),
+    chevronLeft: (s = 14) => svg(`<polyline points="15 18 9 12 15 6"/>`, s),
+    chevronRight: (s = 14) => svg(`<polyline points="9 18 15 12 9 6"/>`, s),
+    calendar: (s = 17) => svg(`<rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>`, s),
   };
 
   /* ================================================================ markdown
@@ -251,13 +254,13 @@
 
     const listRe = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/;
 
-    function render(src) {
-      if (!src) return '';
-      const lines = String(src).replace(/\r\n?/g, '\n').split('\n');
-      const out = [];
-      let i = 0;
+  function render(src, opts = {}) {
+    if (!src) return '';
+    const lines = String(src).replace(/\r\n?/g, '\n').split('\n');
+    const out = [];
+    let i = 0;
 
-      const inline = (text) => {
+    const inline = (text) => {
         let s = String(text);
         const codeSpans = [];
         s = s.replace(/`([^`\n]+)`/g, (_, code) => {
@@ -290,6 +293,22 @@
         s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
         s = s.replace(/(^|\W)\*([^ *\n][^*\n]*?)\*(?!\w)/g, '$1<em>$2</em>');
         s = s.replace(/~~([^~\n]+)~~/g, '<del>$1</del>');
+        // Wikilinks — after every other inline pass (so the generated <a>
+        // cannot be mangled) but before placeholder restore, so links inside
+        // code spans and math (already tokenised) never match. The text is
+        // already escaped here; captures are used as-is.
+        s = s.replace(/\[\[([^\[\]|\n]+?)(?:\|([^\[\]\n]+?))?\]\]/g, (full, rawTarget, rawLabel) => {
+          const target = rawTarget.trim();
+          if (!target) return full;
+          const label = (rawLabel != null ? rawLabel.trim() : '') || target;
+          if (typeof opts.resolve === 'function') {
+            const id = opts.resolve(target);
+            if (id) return `<a class="wikilink" href="#" data-wikilink="${target}">${label}</a>`;
+            return `<a class="wikilink missing" href="#" data-wikilink="${target}" title="Create this note">${label}</a>`;
+          }
+          // No resolver (share page, history viewer): no link affordance.
+          return `<span class="wikilink-plain">${label}</span>`;
+        });
         s = s.replace(/\uE000(\d+)\uE001/g, (_, idx) => codeSpans[Number(idx)] || '');
         s = s.replace(/\uE100(\d+)\uE101/g, (_, idx) => mathSpans[Number(idx)] || '');
         return s;
@@ -451,8 +470,16 @@
     conflict: null,
     trashCache: [],
     trashRetentionDays: 30,
+    // Wikilink index over state.notes; rebuilt on load and note list changes,
+    // updated incrementally on save (see updateLinkIndexFor).
+    linkIndex: { byTitle: new Map(), outbound: new Map(), inbound: new Map() },
+    dayKey: null, // the YYYY-MM-DD of the open daily note, if any
     foldersCollapsed: localStorage.getItem('foldersCollapsed') === '1',
     publicBaseUrl: null, // server-configured origin for absolute share links
+    featuresTimelineParse: false, // /api/session features.timelineParse
+    tlIndex: 0,        // page index into the timeline's date set
+    tlVisited: [],     // dates the user has stepped/jumped to (kept as pages)
+    tlPending: [],     // parsed candidates awaiting confirmation in the modal
     previewFont: (() => {
       const v = parseFloat(localStorage.getItem('previewFontSize'));
       return v >= 12 && v <= 24 ? v : 15.5;
@@ -468,6 +495,9 @@
     app: $('app'), sidebar: $('sidebar'), backdrop: $('sidebar-backdrop'), brand: $('brand-icon'),
     themeBtn: $('theme-btn'), logoutBtn: $('logout-btn'), newBtn: $('new-note-btn'), newIc: $('new-note-ic'),
     searchIcon: $('search-icon'), search: $('search-input'), tagFilter: $('tag-filter'), list: $('note-list'),
+    todayBtn: $('today-btn'), todayIc: $('today-ic'), todayLabel: $('today-label'),
+    dayNav: $('day-nav'), dayPrev: $('day-prev'), dayLabel: $('day-label'),
+    dayNext: $('day-next'), dayToday: $('day-today'),
     addFolderBtn: $('add-folder-btn'), folderList: $('folder-list'), folderFilterEl: $('folder-filter'),
     foldersHead: $('folders-head'), foldersToggle: $('folders-toggle'), foldersLabel: $('folders-label'),
     folderSelect: $('folder-select'),
@@ -481,6 +511,14 @@
     shareBtn: $('share-btn'), shareModal: $('share-modal'), shareExpl: $('share-expl'),
     shareRow: $('share-row'), shareLink: $('share-link'), shareCopy: $('share-copy'),
     shareQrRow: $('share-qr-row'), shareQr: $('share-qr'),
+    newTimelineBtn: $('new-timeline-btn'), newTimelineIc: $('new-timeline-ic'),
+    timeline: $('timeline'), tlPrev: $('tl-prev'), tlDate: $('tl-date'),
+    tlNext: $('tl-next'), tlToday: $('tl-today'), tlParse: $('tl-parse'),
+    tlJump: $('tl-jump'), tlScroller: $('tl-scroller'),
+    tlParseModal: $('tl-parse-modal'), tlParseText: $('tl-parse-text'),
+    tlParseNotice: $('tl-parse-notice'), tlParseResults: $('tl-parse-results'),
+    tlParseRun: $('tl-parse-run'), tlParseConfirm: $('tl-parse-confirm'),
+    tlParseClose: $('tl-parse-close'), segmented: document.querySelector('.editor-actions .segmented'),
     shareCreate: $('share-create'), shareRevoke: $('share-revoke'), shareClose: $('share-close'),
     viewShare: $('view-share'), shareLogo: $('share-logo'), shareTitle: $('share-title'),
     shareMeta: $('share-meta'), shareContent: $('share-content'), shareError: $('share-error'),
@@ -661,10 +699,40 @@
 
   /* ================================================================ app entry */
 
+  function rebuildLinkIndex() {
+    state.linkIndex = NotesLinks.buildLinkIndex(state.notes);
+  }
+
+  /* Incremental index update for one saved note — a full rebuild would
+     re-scan every note's content on each debounced autosave. */
+  function updateLinkIndexFor(note) {
+    const idx = state.linkIndex;
+    // forget this note's title claims (a rename frees the old key)
+    for (const [k, id] of [...idx.byTitle]) {
+      if (id === note.id) idx.byTitle.delete(k);
+    }
+    if (NotesLinks.titleKey(note.title) !== '') {
+      // just-saved note is the newest holder of its title (set overwrites
+      // a duplicate claim, keeping "newest updatedAt wins" deterministic)
+      idx.byTitle.set(NotesLinks.titleKey(note.title), note.id);
+    }
+    // recompute this note's outbound links and its inbound contributions
+    for (const ids of idx.inbound.values()) ids.delete(note.id);
+    const targets = NotesLinks.parseWikilinks(note.content).map((l) => l.target);
+    idx.outbound.set(note.id, targets);
+    for (const t of targets) {
+      const tid = idx.byTitle.get(NotesLinks.titleKey(t));
+      if (tid == null || tid === note.id) continue;
+      if (!idx.inbound.has(tid)) idx.inbound.set(tid, new Set());
+      idx.inbound.get(tid).add(note.id);
+    }
+  }
+
   async function enterApp(user) {
     if (user) state.user = user;
     const [data, foldersData] = await Promise.all([api('/api/notes'), api('/api/folders').catch(() => ({ folders: [] }))]);
     state.notes = data.notes;
+    rebuildLinkIndex();
     state.folders = foldersData.folders;
     // A fresh session should not inherit a stale search/filter.
     state.query = '';
@@ -1039,6 +1107,7 @@
     const row = el('div', 'note-item-title');
     const t = el('span', 't' + (note.title ? '' : ' untitled'), note.title || 'Untitled');
     row.append(t);
+    if (note.kind === 'timeline') row.append(el('span', 'kind-badge', 'timeline'));
     if (note.pinned) {
       const pin = el('span', 'pin');
       pin.innerHTML = pinSvg(13, true);
@@ -1121,10 +1190,17 @@
     updatePinBtn();
     updateShareBtn();
     updateWordCount();
-    // Opening an existing note lands in preview; only new notes start in edit mode.
-    setMode(opts.edit ? 'write' : 'preview');
+    // Timeline notes replace the write/preview editor with the date scroller.
+    if (note.kind === 'timeline') {
+      applyEditorKind(note);
+    } else {
+      applyEditorKind(null);
+      // Opening an existing note lands in preview; only new notes start in edit mode.
+      setMode(opts.edit ? 'write' : 'preview');
+    }
     renderList();
     closeDrawer();
+    updateDayNav();
     if (opts.focusTitle) ui.title.focus();
   }
 
@@ -1162,16 +1238,27 @@
   async function saveNote(note) {
     state.saving = true;
     setSaveStatus('saving');
+    const isTimeline = note.kind === 'timeline';
     try {
       const { note: updated } = await api(`/api/notes/${note.id}`, {
         method: 'PUT',
         body: {
-          title: note.title, content: note.content, tags: note.tags,
+          title: note.title, tags: note.tags,
           pinned: note.pinned, folderId: note.folderId || null, rev: note.rev,
+          // A timeline's content is the derived mirror — never client-supplied.
+          ...(isTimeline
+            ? { kind: 'timeline', timeline: { items: (note.timeline && note.timeline.items) || [] } }
+            : { content: note.content }),
         },
       });
       note.updatedAt = updated.updatedAt;
       note.rev = updated.rev;
+      if (isTimeline) {
+        note.content = updated.content;       // the regenerated mirror
+        note.timeline = updated.timeline;     // normalised items (stable ids)
+        if (state.currentId === note.id) renderTimeline({ keepScroll: true });
+      }
+      updateLinkIndexFor(note);
       state.saving = false;
       const time = new Date(note.updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       setSaveStatus('saved', `Saved ${time}`);
@@ -1224,6 +1311,7 @@
       state.notes = state.notes.filter((n) => n.id !== id);
       if (localStorage.getItem('lastNoteId') === id) localStorage.removeItem('lastNoteId');
       updateCount();
+      rebuildLinkIndex();
     }
   }
 
@@ -1259,6 +1347,13 @@
     note.folderId = serverNote.folderId != null ? serverNote.folderId : null;
     note.updatedAt = serverNote.updatedAt;
     note.rev = serverNote.rev;
+    if (serverNote.kind === 'timeline') {
+      note.kind = 'timeline';
+      note.timeline = serverNote.timeline || { items: [] };
+    } else {
+      delete note.kind;
+      delete note.timeline;
+    }
     if (state.currentId === note.id) {
       ui.title.value = note.title;
       ui.content.value = note.content;
@@ -1266,7 +1361,8 @@
       renderFolderOptions();
       updatePinBtn();
       updateWordCount();
-      if (state.mode === 'preview') renderPreview();
+      if (note.kind === 'timeline') renderTimeline({ keepScroll: true });
+      else if (state.mode === 'preview') renderPreview();
     }
   }
 
@@ -1310,6 +1406,7 @@
       });
       state.notes.unshift(copy);
       updateCount();
+      rebuildLinkIndex();
     } catch (err) {
       toast(`Could not create the copy: ${err.message}`);
     }
@@ -1710,6 +1807,7 @@
       return;
     }
     state.notes = state.notes.filter((n) => n.id !== id);
+    rebuildLinkIndex();
     if (localStorage.getItem('lastNoteId') === id) localStorage.removeItem('lastNoteId');
     updateCount();
     refreshTrashCount();
@@ -1724,6 +1822,7 @@
           state.notes.push(restored);
           updateCount();
           refreshTrashCount();
+          rebuildLinkIndex();
           renderList();
           toast('Note restored');
         } catch (err) {
@@ -1742,6 +1841,7 @@
       const { note } = await api('/api/notes', { method: 'POST', body: { title: '', content: '', tags: [], folderId: state.folderFilter || null } });
       state.notes.unshift(note);
       updateCount();
+      rebuildLinkIndex();
       state.query = '';
       ui.search.value = '';
       setTagFilter(null);
@@ -1769,8 +1869,598 @@
 
   function renderPreview() {
     const note = current();
-    ui.preview.innerHTML = note ? MD.render(note.content) : '';
+    ui.preview.innerHTML = note
+      ? MD.render(note.content, { resolve: (t) => NotesLinks.resolveTitle(state.linkIndex, t) })
+      : '';
+    renderOnThisDay(note);
+    renderBacklinks(note);
+    updateDayNav();
   }
+
+  /* ============================ wikilinks · backlinks · daily notes */
+
+  // "On this day" card above a daily note's preview: notes from earlier
+  // years whose createdAt or updatedAt lands on the same month and day
+  // (local components). Renders nothing when there are none.
+  function renderOnThisDay(note) {
+    const d = note && NotesLinks.parseDateKey(note.title.trim());
+    if (!d) return;
+    const mm = d.getMonth() + 1;
+    const dd = d.getDate();
+    const yy = d.getFullYear();
+    const hits = state.notes
+      .filter((n) => n.id !== note.id)
+      .filter((n) => [n.createdAt, n.updatedAt].some((ts) => {
+        const t = new Date(ts);
+        return t.getFullYear() < yy && t.getMonth() + 1 === mm && t.getDate() === dd;
+      }))
+      .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
+      .slice(0, 5);
+    if (hits.length === 0) return;
+    const card = el('div', 'on-this-day');
+    card.append(el('div', 'otd-head', 'On this day'));
+    for (const h of hits) {
+      const row = el('button', 'otd-row');
+      row.type = 'button';
+      row.dataset.id = h.id;
+      row.append(el('span', 'otd-title', h.title || 'Untitled'));
+      row.append(el('span', 'otd-year', String(new Date(h.createdAt || h.updatedAt).getFullYear())));
+      card.append(row);
+    }
+    ui.preview.insertBefore(card, ui.preview.firstChild);
+  }
+
+  // Backlinks (and outbound links) below the preview body. Preview-only:
+  // never rendered in write mode.
+  function renderBacklinks(note) {
+    if (!note || state.notes.length <= 1) return;
+    const backlinks = NotesLinks.inboundFor(state.linkIndex, note.id, state.notes);
+    const outTargets = state.linkIndex.outbound.get(note.id) || [];
+    if (backlinks.length === 0 && outTargets.length === 0) return;
+
+    const section = el('section', 'backlinks');
+    section.setAttribute('aria-label', 'Linked notes');
+
+    if (outTargets.length > 0) {
+      const line = el('div', 'outbound-line');
+      const resolvedCount = outTargets.filter((t) => NotesLinks.resolveTitle(state.linkIndex, t)).length;
+      line.append(el('span', '', resolvedCount > 0
+        ? `Links to ${resolvedCount} note${resolvedCount === 1 ? '' : 's'}:`
+        : 'Links:'));
+      for (const t of outTargets) {
+        const id = NotesLinks.resolveTitle(state.linkIndex, t);
+        const chip = el('button', id ? 'wikilink-chip' : 'wikilink-chip missing');
+        chip.type = 'button';
+        chip.dataset.target = t;
+        chip.textContent = t;
+        if (!id) chip.title = 'Create this note';
+        line.append(chip);
+      }
+      section.append(line);
+    }
+
+    if (backlinks.length > 0) {
+      const head = el('h3', '', 'Linked from ');
+      const count = el('span', 'count', String(backlinks.length));
+      head.append(count);
+      section.append(head);
+
+      const list = el('ul', 'backlink-list');
+      const shown = backlinks.slice(0, 50);
+      for (const b of shown) {
+        const row = el('button', 'backlink-row');
+        row.type = 'button';
+        row.dataset.id = b.id;
+        row.append(el('span', 'backlink-title', b.title || 'Untitled'));
+        if (b.snippet) row.append(el('span', 'backlink-snippet', b.snippet));
+        const li = el('li');
+        li.append(row);
+        list.append(li);
+      }
+      section.append(list);
+      if (backlinks.length > 50) {
+        section.append(el('div', 'backlinks-more', `and ${backlinks.length - 50} more`));
+      }
+    }
+
+    ui.preview.append(section);
+  }
+
+  // Resolve-or-create for a wikilink target, shared by preview anchors and
+  // the outbound chips in the backlinks section.
+  async function openWikilink(target) {
+    const id = NotesLinks.resolveTitle(state.linkIndex, target);
+    if (id) {
+      selectNote(id);
+      return;
+    }
+    const ok = await confirmModal({
+      title: 'Create this note?',
+      text: `No note titled “${target}” exists yet. Create it now?`,
+      confirmText: 'Create',
+    });
+    if (!ok) return;
+    try {
+      const { note } = await api('/api/notes', {
+        method: 'POST',
+        body: { title: target, content: '', tags: [], folderId: state.folderFilter || null },
+      });
+      state.notes.unshift(note);
+      updateCount();
+      rebuildLinkIndex();
+      renderList();
+      await selectNote(note.id, { edit: true, focusTitle: true });
+    } catch (err) {
+      toast(`Could not create note: ${err.message}`);
+    }
+  }
+
+  // One delegated listener covers preview wikilinks, outbound chips and
+  // backlink rows — no per-link handlers.
+  ui.preview.addEventListener('click', (e) => {
+    const row = e.target.closest('.backlink-row, .otd-row');
+    if (row) {
+      e.preventDefault();
+      selectNote(row.dataset.id);
+      return;
+    }
+    const anchor = e.target.closest('a.wikilink');
+    const chip = e.target.closest('button.wikilink-chip');
+    if (!anchor && !chip) return;
+    e.preventDefault();
+    openWikilink((chip || anchor).dataset.wikilink || (chip || anchor).dataset.target || '');
+  });
+
+  /* ---------- daily notes ---------- */
+
+  // Show/hide the day bar purely from the current note's title: a rename to
+  // or from a date key flips it on the next selectNote/render.
+  function updateDayNav() {
+    const note = current();
+    const key = note && NotesLinks.isDateTitle(note.title)
+      ? NotesLinks.localDateKey(NotesLinks.parseDateKey(note.title.trim()))
+      : null;
+    state.dayKey = key;
+    ui.dayNav.classList.toggle('hidden', !key);
+    if (key) ui.dayLabel.textContent = NotesLinks.formatDayLabel(key);
+  }
+
+  async function openDailyNote(key) {
+    if (!key) return;
+    await flushSave();
+    await pruneIfEmpty(state.currentId);
+    const k = NotesLinks.titleKey(key);
+    const found = state.notes.find((n) => NotesLinks.titleKey(n.title) === k);
+    if (found) {
+      await selectNote(found.id);
+      return;
+    }
+    let note;
+    try {
+      ({ note } = await api('/api/notes', {
+        method: 'POST',
+        body: { title: key, content: '', tags: [], folderId: state.folderFilter || null },
+      }));
+    } catch (err) {
+      toast(`Could not create daily note: ${err.message}`);
+      return;
+    }
+    // Duplicate guard: another note with this title may have appeared while
+    // the POST was in flight (double click, second tab). Keep the older one,
+    // discard the one we just created, select the survivor.
+    const dup = state.notes.find((n) => NotesLinks.titleKey(n.title) === k);
+    if (dup) {
+      try { await api(`/api/notes/${note.id}`, { method: 'DELETE' }); } catch { /* already gone */ }
+      await selectNote(dup.id);
+      return;
+    }
+    state.notes.unshift(note);
+    updateCount();
+    rebuildLinkIndex();
+    renderList();
+    await selectNote(note.id, { edit: true, focusTitle: false });
+  }
+
+  ui.todayBtn.addEventListener('click', () => openDailyNote(NotesLinks.localDateKey(new Date())));
+  ui.dayToday.addEventListener('click', () => openDailyNote(NotesLinks.localDateKey(new Date())));
+  ui.dayPrev.addEventListener('click', () => { if (state.dayKey) openDailyNote(NotesLinks.addDays(state.dayKey, -1)); });
+  ui.dayNext.addEventListener('click', () => { if (state.dayKey) openDailyNote(NotesLinks.addDays(state.dayKey, 1)); });
+
+  /* ================================ timeline notes */
+
+  const tlItems = (note) => {
+    const n = note || current();
+    return (n && n.timeline && n.timeline.items) || [];
+  };
+  const tlToday = () => NotesLinks.localDateKey(new Date());
+
+  function tlDates() {
+    return NotesTimeline.pageDates(tlItems(), tlToday(), state.tlVisited);
+  }
+
+  // Show/hide the editor chrome per note kind. `note` null = markdown.
+  function applyEditorKind(note) {
+    const isTimeline = note && note.kind === 'timeline';
+    ui.timeline.classList.toggle('hidden', !isTimeline);
+    if (ui.segmented) ui.segmented.classList.toggle('hidden', !!isTimeline);
+    if (isTimeline) {
+      ui.content.classList.add('hidden');
+      ui.preview.classList.add('hidden');
+      ui.fontCtl.classList.add('hidden');
+      ui.toolbar.classList.add('hidden');
+      state.tlVisited = [];
+      const dates = tlDates();
+      state.tlIndex = Math.max(0, dates.indexOf(tlToday()));
+      renderTimeline({ instant: true });
+    }
+  }
+
+  async function newTimelineNote() {
+    await flushSave();
+    await pruneIfEmpty(state.currentId);
+    try {
+      const { note } = await api('/api/notes', {
+        method: 'POST',
+        body: { title: 'Timeline', kind: 'timeline', timeline: { items: [] }, tags: [], folderId: state.folderFilter || null },
+      });
+      state.notes.unshift(note);
+      updateCount();
+      state.query = '';
+      ui.search.value = '';
+      setTagFilter(null);
+      await selectNote(note.id);
+    } catch (err) {
+      toast(`Could not create timeline: ${err.message}`);
+    }
+  }
+
+  ui.newTimelineBtn.addEventListener('click', newTimelineNote);
+
+  function updateTlBar() {
+    const dates = tlDates();
+    const d = dates[state.tlIndex] || tlToday();
+    ui.tlDate.textContent = NotesLinks.formatDayLabel(d);
+  }
+
+  function renderTimeline(opts = {}) {
+    const note = current();
+    if (!note || note.kind !== 'timeline') return;
+    const items = tlItems(note);
+    const dates = tlDates();
+    if (state.tlIndex < 0) state.tlIndex = 0;
+    if (state.tlIndex >= dates.length) state.tlIndex = dates.length - 1;
+    const scrollLeft = ui.tlScroller.scrollLeft;
+    ui.tlScroller.innerHTML = '';
+    for (const p of NotesTimeline.visiblePages(dates, state.tlIndex)) {
+      const page = el('div', 'tl-page' + (p.placeholder ? ' tl-placeholder' : ''));
+      page.dataset.date = p.date;
+      if (p.placeholder) {
+        const n = items.filter((i) => i.date === p.date).length;
+        page.append(el('div', 'tl-ph-label', `${p.date} · ${n} item${n === 1 ? '' : 's'}`));
+      } else {
+        renderTlPage(page, p.date, items, note);
+      }
+      ui.tlScroller.append(page);
+    }
+    updateTlBar();
+    if (opts.keepScroll) {
+      ui.tlScroller.scrollLeft = scrollLeft;
+    } else {
+      jumpToDate(dates[state.tlIndex] || tlToday(), opts.instant ? 'auto' : 'smooth', { render: false });
+    }
+  }
+
+  function renderTlPage(page, date, items, note) {
+    const dayItems = items.filter((i) => i.date === date);
+    const head = el('div', 'tl-page-head');
+    head.append(el('span', 'tl-page-date', NotesLinks.formatDayLabel(date)));
+    head.append(el('span', 'tl-page-count', `${dayItems.length} item${dayItems.length === 1 ? '' : 's'}`));
+    page.append(head);
+
+    if (items.length === 0 && date === tlToday()) {
+      page.append(el('div', 'tl-empty-hint', 'No items yet — use Paste & parse, or add one below.'));
+    } else if (dayItems.length === 0) {
+      page.append(el('div', 'tl-empty-hint subtle', 'Nothing on this date.'));
+    }
+
+    for (const item of dayItems) page.append(tlItemRow(item));
+
+    const add = el('div', 'tl-add');
+    const ta = el('textarea', 'tl-add-text');
+    ta.placeholder = `Add to ${date}…`;
+    ta.rows = 2;
+    ta.dataset.role = 'tl-add-text';
+    ta.dataset.date = date;
+    const btn = el('button', 'btn sm primary', 'Add');
+    btn.type = 'button';
+    btn.dataset.role = 'tl-add-btn';
+    btn.dataset.date = date;
+    add.append(ta, btn);
+    page.append(add);
+  }
+
+  function tlItemRow(item) {
+    const row = el('article', 'tl-item');
+    row.dataset.id = item.id;
+    const body = el('div', 'tl-item-body');
+    body.append(el('div', 'tl-item-text', item.text));
+    body.append(el('div', 'tl-item-time', fmtRel(item.updatedAt || item.createdAt)));
+    const actions = el('div', 'tl-item-actions');
+    for (const [act, label] of [['edit', 'Edit item'], ['move', 'Move item to another date'], ['delete', 'Delete item']]) {
+      const b = el('button', 'icon-btn tl-act');
+      b.type = 'button';
+      b.dataset.action = act;
+      b.dataset.id = item.id;
+      b.title = label;
+      b.setAttribute('aria-label', label);
+      b.innerHTML = act === 'edit' ? ICONS.edit(14) : act === 'move' ? ICONS.calendar(14) : ICONS.x(13);
+      actions.append(b);
+    }
+    row.append(body, actions);
+    return row;
+  }
+
+  // Any item mutation flows through here: update in memory, re-render the
+  // affected page (keeping scroll), and let autosave persist it.
+  function tlMutate(fn) {
+    const note = current();
+    if (!note || note.kind !== 'timeline') return;
+    note.timeline = { items: fn((note.timeline && note.timeline.items) || []) };
+    renderTimeline({ keepScroll: true });
+    scheduleSave();
+  }
+
+  function beginEditItem(article, item) {
+    article.textContent = '';
+    article.classList.add('editing');
+    const ta = el('textarea', 'tl-edit-text');
+    ta.value = item.text;
+    ta.rows = 2;
+    const row = el('div', 'tl-edit-actions');
+    const save = el('button', 'btn sm primary', 'Save');
+    save.type = 'button';
+    const cancel = el('button', 'btn sm', 'Cancel');
+    cancel.type = 'button';
+    save.addEventListener('click', () => {
+      const v = ta.value.trim();
+      if (v) tlMutate((items) => NotesTimeline.updateItemText(items, item.id, v));
+    });
+    cancel.addEventListener('click', () => renderTimeline({ keepScroll: true }));
+    ta.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') renderTimeline({ keepScroll: true });
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); save.click(); }
+    });
+    row.append(save, cancel);
+    article.append(ta, row);
+    ta.focus();
+  }
+
+  function beginMoveItem(article, item) {
+    article.textContent = '';
+    article.classList.add('editing');
+    const input = el('input', 'tl-move-date');
+    input.type = 'date';
+    input.value = item.date;
+    const row = el('div', 'tl-edit-actions');
+    const ok = el('button', 'btn sm primary', 'Move');
+    ok.type = 'button';
+    const cancel = el('button', 'btn sm', 'Cancel');
+    cancel.type = 'button';
+    ok.addEventListener('click', () => {
+      const d = input.value;
+      if (d && NotesLinks.isDateTitle(d)) {
+        state.tlVisited.push(d);
+        tlMutate((items) => NotesTimeline.moveItem(items, item.id, d));
+      } else {
+        renderTimeline({ keepScroll: true });
+      }
+    });
+    cancel.addEventListener('click', () => renderTimeline({ keepScroll: true }));
+    input.addEventListener('keydown', (e) => { if (e.key === 'Escape') renderTimeline({ keepScroll: true }); });
+    row.append(ok, cancel);
+    article.append(input, row);
+    input.focus();
+  }
+
+  // One delegated listener for item actions and per-page add fields.
+  ui.tlScroller.addEventListener('click', (e) => {
+    const act = e.target.closest('.tl-act');
+    if (act) {
+      const article = act.closest('.tl-item');
+      const item = tlItems().find((i) => i.id === act.dataset.id);
+      if (!article || !item) return;
+      if (act.dataset.action === 'edit') beginEditItem(article, item);
+      else if (act.dataset.action === 'move') beginMoveItem(article, item);
+      else if (act.dataset.action === 'delete') {
+        tlMutate((items) => NotesTimeline.removeItem(items, item.id));
+        toast('Item deleted', {
+          action: 'Undo',
+          onAction: () => tlMutate((items) => [...items, item]),
+        });
+      }
+      return;
+    }
+    const addBtn = e.target.closest('[data-role="tl-add-btn"]');
+    if (addBtn) {
+      const page = addBtn.closest('.tl-page');
+      const ta = page && page.querySelector('[data-role="tl-add-text"]');
+      if (ta && ta.value.trim()) {
+        tlMutate((items) => [...items, NotesTimeline.makeItem(addBtn.dataset.date, ta.value)]);
+      }
+    }
+  });
+
+  ui.tlScroller.addEventListener('keydown', (e) => {
+    const ta = e.target.closest('[data-role="tl-add-text"]');
+    if (ta && e.key === 'Enter' && !e.shiftKey) {
+      // Enter adds, Shift+Enter inserts a newline.
+      e.preventDefault();
+      if (ta.value.trim()) tlMutate((items) => [...items, NotesTimeline.makeItem(ta.dataset.date, ta.value)]);
+      return;
+    }
+    if (e.target !== ui.tlScroller) return;
+    if (e.key === 'ArrowLeft') { e.preventDefault(); stepDay(-1); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); stepDay(1); }
+    else if (e.key === 't' || e.key === 'T') { e.preventDefault(); jumpToDate(tlToday()); }
+  });
+
+  function jumpToDate(date, behavior = 'smooth', opts = {}) {
+    if (!NotesLinks.isDateTitle(date)) return;
+    if (!state.tlVisited.includes(date)) state.tlVisited.push(date);
+    if (opts.render !== false) renderTimeline({ instant: behavior === 'auto' });
+    const dates = tlDates();
+    state.tlIndex = Math.max(0, dates.indexOf(date));
+    const page = ui.tlScroller.querySelector(`.tl-page[data-date="${date}"]`);
+    if (page) page.scrollIntoView({ inline: 'center', block: 'nearest', behavior });
+    updateTlBar();
+  }
+
+  function stepDay(delta) {
+    const dates = tlDates();
+    const cur = dates[state.tlIndex] || tlToday();
+    jumpToDate(NotesLinks.addDays(cur, delta) || tlToday());
+  }
+
+  ui.tlPrev.addEventListener('click', () => stepDay(-1));
+  ui.tlNext.addEventListener('click', () => stepDay(1));
+  ui.tlToday.addEventListener('click', () => jumpToDate(tlToday()));
+  ui.tlDate.addEventListener('click', () => {
+    ui.tlJump.focus();
+    try { ui.tlJump.showPicker(); } catch { /* older browsers: type manually */ }
+  });
+  ui.tlJump.addEventListener('change', () => {
+    if (ui.tlJump.value) jumpToDate(ui.tlJump.value);
+  });
+
+  // Keep the bar in sync while the user scrolls pages manually.
+  ui.tlScroller.addEventListener('scroll', () => {
+    if (ui.tlScroller._raf) return;
+    ui.tlScroller._raf = requestAnimationFrame(() => {
+      ui.tlScroller._raf = null;
+      const center = ui.tlScroller.scrollLeft + ui.tlScroller.clientWidth / 2;
+      let best = 0;
+      let bestDist = Infinity;
+      ui.tlScroller.querySelectorAll('.tl-page').forEach((p, i) => {
+        const mid = p.offsetLeft + p.offsetWidth / 2;
+        const dist = Math.abs(mid - center);
+        if (dist < bestDist) { bestDist = dist; best = i; }
+      });
+      if (best !== state.tlIndex) { state.tlIndex = best; updateTlBar(); }
+    });
+  }, { passive: true });
+
+  /* ---------- paste & parse ---------- */
+
+  function tlParseNotice(msg) {
+    ui.tlParseNotice.textContent = msg || '';
+    ui.tlParseNotice.classList.toggle('hidden', !msg);
+  }
+
+  function openTlParse() {
+    const note = current();
+    if (!note || note.kind !== 'timeline') return;
+    ui.tlParseText.value = '';
+    tlParseNotice('');
+    ui.tlParseResults.innerHTML = '';
+    ui.tlParseResults.classList.add('hidden');
+    ui.tlParseRun.classList.remove('hidden');
+    ui.tlParseRun.disabled = false;
+    ui.tlParseConfirm.classList.add('hidden');
+    state.tlPending = [];
+    ui.tlParse.textContent = state.featuresTimelineParse ? 'Paste & parse' : 'Paste & parse (basic)';
+    ui.tlParseModal.classList.remove('hidden');
+    ui.tlParseText.focus();
+  }
+
+  function showTlParseResults(items, notice) {
+    state.tlPending = items;
+    tlParseNotice(notice || '');
+    ui.tlParseResults.innerHTML = '';
+    const groups = NotesTimeline.groupByDate(items.map((i) => ({ ...i })));
+    for (const g of groups) {
+      ui.tlParseResults.append(el('div', 'tl-res-date', NotesLinks.formatDayLabel(g.date)));
+      for (const item of g.items) {
+        const row = el('div', 'tl-res-row');
+        row.dataset.text = item.text;
+        const cb = el('input', 'tl-res-check');
+        cb.type = 'checkbox';
+        cb.checked = true;
+        const date = el('input', 'tl-res-date-input');
+        date.type = 'date';
+        date.value = item.date;
+        const txt = el('span', 'tl-res-text', item.text);
+        row.append(cb, date, txt);
+        if (item.guessed) row.append(el('span', 'tl-res-guessed', 'date guessed'));
+        ui.tlParseResults.append(row);
+      }
+    }
+    ui.tlParseResults.classList.remove('hidden');
+    ui.tlParseRun.classList.add('hidden');
+    ui.tlParseConfirm.classList.remove('hidden');
+    updateTlConfirmCount();
+  }
+
+  function updateTlConfirmCount() {
+    const n = [...ui.tlParseResults.querySelectorAll('.tl-res-check')]
+      .filter((c) => c.checked).length;
+    ui.tlParseConfirm.textContent = `Add ${n} item${n === 1 ? '' : 's'}`;
+  }
+
+  ui.tlParseResults.addEventListener('change', (e) => {
+    if (e.target.classList.contains('tl-res-check')) updateTlConfirmCount();
+  });
+
+  ui.tlParse.addEventListener('click', openTlParse);
+  ui.tlParseClose.addEventListener('click', () => ui.tlParseModal.classList.add('hidden'));
+
+  ui.tlParseRun.addEventListener('click', async () => {
+    const text = ui.tlParseText.value;
+    if (!text.trim()) { tlParseNotice('Paste some text first.'); return; }
+    const today = tlToday();
+    if (!state.featuresTimelineParse) {
+      showTlParseResults(NotesTimeline.parseFallback(text, today, NotesLinks.addDays));
+      return;
+    }
+    ui.tlParseRun.disabled = true;
+    tlParseNotice('Parsing…');
+    try {
+      const data = await api('/api/timeline/parse', { method: 'POST', body: { text, today } });
+      showTlParseResults(data.items);
+    } catch (err) {
+      if (err.status === 429) {
+        tlParseNotice('Too many parses this hour — try again later.');
+      } else {
+        // Never lose the pasted text: fall back locally, keep the textarea.
+        // Surface the server's reason (balance, auth, timeout) when we have it.
+        const reason = err.message ? ` (${err.message})` : '';
+        showTlParseResults(NotesTimeline.parseFallback(text, today, NotesLinks.addDays),
+          `Couldn't reach the AI service — used basic parsing${reason}`);
+      }
+    } finally {
+      ui.tlParseRun.disabled = false;
+    }
+  });
+
+  ui.tlParseConfirm.addEventListener('click', () => {
+    const note = current();
+    if (!note || note.kind !== 'timeline') return;
+    const selected = [];
+    for (const row of ui.tlParseResults.querySelectorAll('.tl-res-row')) {
+      const cb = row.querySelector('.tl-res-check');
+      if (!cb || !cb.checked) continue;
+      const dateInput = row.querySelector('.tl-res-date-input');
+      const date = dateInput.value && NotesLinks.isDateTitle(dateInput.value) ? dateInput.value : tlToday();
+      selected.push({ date, text: row.dataset.text });
+    }
+    if (selected.length) {
+      note.timeline = { items: NotesTimeline.mergeParsed(tlItems(note), selected) };
+      for (const s of selected) if (!state.tlVisited.includes(s.date)) state.tlVisited.push(s.date);
+      scheduleSave();
+      renderTimeline();
+      toast(`Added ${selected.length} item${selected.length === 1 ? '' : 's'}`);
+    }
+    ui.tlParseModal.classList.add('hidden');
+  });
 
   /* Interactive task checkboxes: clicking one flips the matching
      "- [ ]"/"- [x]" marker in the markdown source. Lines inside fenced
@@ -1898,6 +2588,7 @@
           state.notes.push(restoredNote);
           updateCount();
           renderTrashCount();
+          rebuildLinkIndex();
           renderTrashList();
           renderList();
           toast('Note restored');
@@ -2449,6 +3140,12 @@
     ui.newIc.innerHTML = ICONS.plus();
     ui.addFolderBtn.innerHTML = ICONS.plus(14);
     ui.foldersToggle.innerHTML = ICONS.chevron();
+    ui.todayIc.innerHTML = ICONS.calendar();
+    ui.dayPrev.innerHTML = ICONS.chevronLeft();
+    ui.dayNext.innerHTML = ICONS.chevronRight();
+    ui.newTimelineIc.innerHTML = ICONS.calendar();
+    ui.tlPrev.innerHTML = ICONS.chevronLeft();
+    ui.tlNext.innerHTML = ICONS.chevronRight();
     ui.logoutBtn.innerHTML = ICONS.logout();
     ui.menuBtn.innerHTML = ICONS.menu(20);
     ui.delBtn.innerHTML = ICONS.trash();
@@ -2481,6 +3178,7 @@
       state.registrationOpen = s.registrationOpen !== false;
       if (Number.isFinite(s.trashRetentionDays)) state.trashRetentionDays = s.trashRetentionDays;
       state.publicBaseUrl = typeof s.publicBaseUrl === 'string' ? s.publicBaseUrl : null;
+      state.featuresTimelineParse = !!(s.features && s.features.timelineParse);
       if (s.needsSetup) showAuth('setup');
       else if (s.authenticated) {
         state.user = s.user;

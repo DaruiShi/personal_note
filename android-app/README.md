@@ -79,6 +79,15 @@ the phone app share one account and the same notes.
   through the same base the link shows, so scanning always opens the URL
   in the dialog. A server-configured `PUBLIC_BASE_URL` (also advertised
   in `/api/session`) overrides the local share-link base.
+- **Wikilinks and backlinks** — `[[Note title]]` (or `[[Note title|label]]`)
+  renders as a link in the preview; tapping opens that note, or offers to
+  create it when no note has the title (missing links render muted). The
+  link index is maintained client-side over the cached notes. A preview
+  ends with a "Linked from" section listing notes that wikilink to it,
+  each with a snippet, plus a chips line of the note's own outgoing links.
+- **Daily notes** — the calendar action on the notes screen opens (or
+  creates) today's note titled `YYYY-MM-DD`; while such a note is open, a
+  ‹ label › Today bar steps between days. Daily notes are plain notes.
 - **Preview text size** — Settings → Appearance offers Small / Default /
   Large / Huge; the scale applies to the preview title and body and is
   remembered.
@@ -136,7 +145,7 @@ In Android Studio: open the `android-app` folder and press Run.
 
 ## Install on the Redmi K80 Pro
 
-1. Copy `FunshareNotes-v1.18.apk` to the phone (USB transfer, 微信文件传输助手, etc.).
+1. Copy `FunshareNotes-v1.19.apk` to the phone (USB transfer, 微信文件传输助手, etc.).
 2. Open it from the file manager (小米文件管理 → 安装包). HyperOS will ask
    to allow installing from this source — allow it once.
 3. First screen: set the **server address** (see below), then sign in with
