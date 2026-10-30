@@ -128,15 +128,8 @@ class Api(private val store: Store) {
 
     /* ------------------------------------------------------------- session */
 
-    suspend fun session(baseUrlOverride: String? = null): SessionInfo {
-        val j = request("GET", "/api/session", baseUrlOverride = baseUrlOverride)
-        return SessionInfo(
-            needsSetup = j.optBoolean("needsSetup"),
-            authenticated = j.optBoolean("authenticated"),
-            user = j.optJSONObject("user")?.let { parseUser(it) },
-            registrationOpen = j.optBoolean("registrationOpen"),
-        )
-    }
+    suspend fun session(baseUrlOverride: String? = null): SessionInfo =
+        SessionInfo.fromJson(request("GET", "/api/session", baseUrlOverride = baseUrlOverride))
 
     suspend fun login(username: String, password: String): User {
         val j = request("POST", "/api/login", JSONObject()
@@ -328,6 +321,26 @@ class Api(private val store: Store) {
                     throw ApiException(resp.code, json.optString("code").ifEmpty { null }, json, json.optString("error").ifEmpty { "HTTP ${resp.code}" })
                 }
             }
+        }
+    }
+
+    /**
+     * Fetch the server-rendered QR for a share token, as SVG text. Fetched
+     * through [baseUrlOverride] — the same origin the share link shows — so
+     * the URL encoded in the code always matches the link in the dialog
+     * (when the server has no PUBLIC_BASE_URL it derives the origin from the
+     * request Host header). Returns null on any failure; callers hide the QR.
+     */
+    suspend fun fetchQrSvg(token: String, baseUrlOverride: String?): String? = withContext(Dispatchers.IO) {
+        try {
+            val req = Request.Builder().url(urlFor("/share/$token/qr.svg", baseUrlOverride)).get().build()
+            client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@use null
+                val body = resp.body?.string() ?: return@use null
+                if (body.startsWith("<svg")) body else null
+            }
+        } catch (e: Exception) {
+            null
         }
     }
 

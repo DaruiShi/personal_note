@@ -65,7 +65,32 @@ data class SessionInfo(
     val authenticated: Boolean,
     val user: User?,
     val registrationOpen: Boolean,
-)
+    /** Server has the QR module and serves /share/<token>/qr.svg. */
+    val featuresQr: Boolean = false,
+    /**
+     * Canonical public origin the server wants in share links (its
+     * PUBLIC_BASE_URL); null when the server did not advertise one.
+     */
+    val publicBaseUrl: String? = null,
+) {
+    companion object {
+        fun fromJson(o: JSONObject): SessionInfo = SessionInfo(
+            needsSetup = o.optBoolean("needsSetup"),
+            authenticated = o.optBoolean("authenticated"),
+            user = o.optJSONObject("user")?.let {
+                User(
+                    id = it.optString("id"),
+                    name = it.optString("name"),
+                    isAdmin = it.optBoolean("isAdmin"),
+                    createdAt = it.optLong("createdAt"),
+                )
+            },
+            registrationOpen = o.optBoolean("registrationOpen"),
+            featuresQr = o.optJSONObject("features")?.optBoolean("qr") == true,
+            publicBaseUrl = o.optString("publicBaseUrl").ifEmpty { null },
+        )
+    }
+}
 
 data class AdminUser(
     val id: String,

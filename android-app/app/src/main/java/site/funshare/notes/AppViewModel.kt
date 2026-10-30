@@ -10,6 +10,7 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import android.graphics.Bitmap
 import java.io.IOException
 import java.util.UUID
 
@@ -43,6 +44,9 @@ enum class ThemeMode(val label: String) {
 }
 
 class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
+
+    /** Share-token path segment of a share link ("/share/<32 hex chars>"). */
+    private val SHARE_TOKEN = Regex("""/share/([0-9a-f]{32})""")
     private val store = app.store
     val api = Api(store)
 
@@ -116,6 +120,11 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
     var trashLoading by mutableStateOf(false)
         private set
 
+    /* share state (from /api/session) */
+    /** Server serves /share/<token>/qr.svg; false on servers without the QR module. */
+    var shareQrEnabled by mutableStateOf(false)
+        private set
+
     init {
         viewModelScope.launch { boot() }
     }
@@ -127,6 +136,7 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
         if (store.sessionCookie != null) {
             try {
                 val s = api.session()
+                applySessionFeatures(s)
                 if (s.authenticated && s.user != null) {
                     user = s.user
                     store.cachedUser = s.user
@@ -189,7 +199,7 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
                 store.serverUrl = base
                 store.trustAllCerts = trustAll
                 api.reloadClient()
-                sessionInfo = api.session()
+                sessionInfo = api.session().also { applySessionFeatures(it) }
             } catch (e: Exception) {
                 sessionInfo = null
             } finally {
@@ -619,11 +629,21 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
     val serverBase: String
         get() = Api.normalizeBaseUrl(store.serverUrl)
 
-    /** Normalized public base URL for materializing share/upload addresses. */
+    /**
+     * Canonical public base for share/upload addresses. A base advertised by
+     * the server (its PUBLIC_BASE_URL — the origin it bakes into link
+     * previews and QR codes) wins; otherwise the local share-link setting.
+     */
     val publicBase: String
         get() = Api.normalizeBaseUrl(
-            store.shareLinkBase.trim().ifEmpty { Store.DEFAULT_SHARE_BASE },
+            sessionInfo?.publicBaseUrl?.takeIf { it.isNotBlank() }
+                ?: store.shareLinkBase.trim().ifEmpty { Store.DEFAULT_SHARE_BASE },
         )
+
+    /** Cache the share-relevant parts of /api/session. */
+    private fun applySessionFeatures(s: SessionInfo) {
+        shareQrEnabled = s.featuresQr
+    }
 
     private fun saveEditor(id: String) {
         viewModelScope.launch {
@@ -889,6 +909,19 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * Rendered QR bitmap for an absolute share link, or null when the server
+     * has no QR module, the link has no token, or the fetch/parse fails —
+     * callers simply hide the QR in that case. The SVG is fetched through
+     * [publicBase] so the encoded URL is the same origin the dialog shows.
+     */
+    suspend fun loadShareQr(linkUrl: String): Bitmap? {
+        if (!shareQrEnabled) return null
+        val token = SHARE_TOKEN.find(linkUrl)?.groupValues?.get(1) ?: return null
+        val svg = api.fetchQrSvg(token, publicBase) ?: return null
+        return QrSvg.render(svg, 640)
+    }
+
     fun applyThemeMode(mode: ThemeMode) {
         themeMode = mode
         store.themeMode = mode.name.lowercase()
@@ -906,6 +939,7 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
             try {
                 val s = api.session()
                 sessionInfo = s
+                applySessionFeatures(s)
                 postMessage("Connection OK" + if (s.authenticated) " — signed in as ${s.user?.name}" else "")
             } catch (e: Exception) {
                 postMessage(Api.describeError(e))

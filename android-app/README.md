@@ -73,6 +73,12 @@ the phone app share one account and the same notes.
   outsiders can't reach. Recipients open `/share/<token>` in any
   browser — the web app renders it read-only, including images and
   attachments via the `?s=<token>` asset grace.
+- **Share QR code** — when the server advertises `features.qr`, the share
+  dialog also shows a QR code fetched from `/share/<token>/qr.svg`
+  (rendered locally from the SVG rects — no extra library). It is fetched
+  through the same base the link shows, so scanning always opens the URL
+  in the dialog. A server-configured `PUBLIC_BASE_URL` (also advertised
+  in `/api/session`) overrides the local share-link base.
 - **Preview text size** — Settings → Appearance offers Small / Default /
   Large / Huge; the scale applies to the preview title and body and is
   remembered.
@@ -130,7 +136,7 @@ In Android Studio: open the `android-app` folder and press Run.
 
 ## Install on the Redmi K80 Pro
 
-1. Copy `FunshareNotes-v1.17.apk` to the phone (USB transfer, 微信文件传输助手, etc.).
+1. Copy `FunshareNotes-v1.18.apk` to the phone (USB transfer, 微信文件传输助手, etc.).
 2. Open it from the file manager (小米文件管理 → 安装包). HyperOS will ask
    to allow installing from this source — allow it once.
 3. First screen: set the **server address** (see below), then sign in with
