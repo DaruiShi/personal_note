@@ -259,6 +259,67 @@ class Api(private val store: Store) {
         return parseNote(request("PUT", "/api/notes/$id", body))
     }
 
+    /** Create a gallery note; the server derives the markdown mirror. */
+    suspend fun createGalleryNote(
+        title: String,
+        cards: List<GalleryCard>,
+        tags: List<String>,
+        pinned: Boolean,
+        folderId: String? = null,
+    ): Note = parseNote(request("POST", "/api/notes", JSONObject()
+        .put("kind", "gallery")
+        .put("gallery", GalleryCard.listToJson(cards))
+        .put("title", title)
+        .put("tags", JSONArray(tags))
+        .put("pinned", pinned)
+        .put("folderId", folderId ?: JSONObject.NULL)))
+
+    /** Update a gallery note (kind + cards; content is server-derived). */
+    suspend fun updateGalleryNote(
+        id: String,
+        title: String,
+        cards: List<GalleryCard>,
+        tags: List<String>,
+        pinned: Boolean,
+        folderId: String? = null,
+        rev: Int? = null,
+    ): Note {
+        val body = JSONObject()
+            .put("kind", "gallery")
+            .put("gallery", GalleryCard.listToJson(cards))
+            .put("title", title)
+            .put("tags", JSONArray(tags))
+            .put("pinned", pinned)
+            .put("folderId", folderId ?: JSONObject.NULL)
+        if (rev != null) body.put("rev", rev)
+        return parseNote(request("PUT", "/api/notes/$id", body))
+    }
+
+    /**
+     * Ask the server for a title and/or tags for ONE card's content (and
+     * nothing else from the note). Returns (title?, tags?); throws
+     * ApiException with the route's codes (llm_not_configured / busy /
+     * too_many_requests / llm_timeout / llm_failed / llm_unparsable).
+     */
+    suspend fun suggestGallery(
+        content: String,
+        needTitle: Boolean,
+        needTags: Boolean,
+        maxTags: Int = 5,
+    ): Pair<String?, List<String>?> {
+        val j = request("POST", "/api/gallery/suggest", JSONObject()
+            .put("content", content)
+            .put("need", JSONObject()
+                .put("title", needTitle)
+                .put("tags", needTags))
+            .put("maxTags", maxTags))
+        val tags = run {
+            val a = j.optJSONArray("tags") ?: return@run null
+            List(a.length()) { a.optString(it) }.filter { it.isNotEmpty() }
+        }
+        return j.optString("title").ifEmpty { null } to tags
+    }
+
     suspend fun deleteNote(id: String) {
         request("DELETE", "/api/notes/$id")
     }

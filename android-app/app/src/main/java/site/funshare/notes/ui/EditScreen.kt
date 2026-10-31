@@ -25,6 +25,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -51,6 +53,7 @@ import androidx.compose.material.icons.filled.FormatListBulleted
 import androidx.compose.material.icons.filled.FormatQuote
 import androidx.compose.material.icons.filled.HorizontalRule
 import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.filled.Tag
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Title
 import androidx.compose.material.icons.outlined.CheckBox
@@ -272,6 +275,7 @@ fun EditScreen(vm: AppViewModel) {
     var shareUrl by remember { mutableStateOf<String?>(null) }
     var moveOpen by remember { mutableStateOf(false) }
     var wikilinkCreate by remember { mutableStateOf<String?>(null) }
+    var citeOpen by remember { mutableStateOf(false) }
 
     /* Preview wikilink taps arrive through the global Markwon link resolver
        (the renderer is cached app-wide, so the handler is a settable hook). */
@@ -385,7 +389,7 @@ fun EditScreen(vm: AppViewModel) {
                     }
                 },
                 actions = {
-                    if (!vm.editIsTimeline) {
+                    if (!vm.editIsTimeline && !vm.editIsGallery) {
                         IconButton(onClick = { preview = !preview }) {
                             Icon(
                                 if (preview) Icons.Filled.Edit else Icons.AutoMirrored.Filled.MenuBook,
@@ -464,6 +468,11 @@ fun EditScreen(vm: AppViewModel) {
                     vm = vm,
                     modifier = Modifier.fillMaxSize(),
                 )
+            } else if (vm.editIsGallery) {
+                GalleryEditor(
+                    vm = vm,
+                    modifier = Modifier.fillMaxSize(),
+                )
             } else if (preview) {
                 val fontScale = vm.previewFontScale
                 // Wikilinks become markdown links with a private scheme the
@@ -472,7 +481,11 @@ fun EditScreen(vm: AppViewModel) {
                     preprocessLatex(
                         resolvePreviewUrls(vm.editContent, vm.publicBase, serverBase),
                     ),
-                ) { vm.resolveWikilink(it) }
+                    resolve = { vm.resolveWikilink(it) },
+                    resolveDisplay = { t ->
+                        NotesLinks.resolveCitation(vm.linkIndex, vm.notes, t)?.title
+                    },
+                )
                 val noteId = noteKey.takeIf { it != "new" && !it.startsWith("local:") }
                 val backlinks = remember(vm.linkIndex, noteId, vm.notes) {
                     noteId?.let { NotesLinks.inboundFor(vm.linkIndex, it, vm.notes) } ?: emptyList()
@@ -599,7 +612,8 @@ fun EditScreen(vm: AppViewModel) {
                                 .horizontalScroll(rememberScrollState())
                                 .padding(horizontal = 4.dp, vertical = 2.dp),
                         ) {
-                            ToolbarButton(Icons.Filled.Image, "Insert image") {
+                            ToolbarButton(Icons.Filled.Tag, "Cite note") { citeOpen = true }
+            ToolbarButton(Icons.Filled.Image, "Insert image") {
                                 pickImage.launch(
                                     PickVisualMediaRequest(
                                         ActivityResultContracts.PickVisualMedia.ImageOnly,
@@ -765,6 +779,26 @@ fun EditScreen(vm: AppViewModel) {
             vm = vm,
             noteId = vm.editingKey,
             onDismiss = { moveOpen = false },
+        )
+    }
+
+    if (citeOpen) {
+        CiteNoteDialog(
+            vm = vm,
+            onInsert = { title ->
+                citeOpen = false
+                vm.insertAtCursor("[[$title]]")
+            },
+            onCopySelf = {
+                val r = NotesLinks.citationFor(vm.notes.firstOrNull { it.id == vm.editingKey })
+                if (r.blocked) vm.postMessage(r.reason ?: "Cannot cite this note")
+                else {
+                    val cm = context.getSystemService(ClipboardManager::class.java)
+                    cm?.setPrimaryClip(android.content.ClipData.newPlainText("citation", r.text))
+                    vm.postMessage("Citation copied")
+                }
+            },
+            onClose = { citeOpen = false },
         )
     }
 
@@ -1218,3 +1252,101 @@ private fun androidx.compose.ui.graphics.Color.toArgbCompat(): Int =
     android.graphics.Color.argb(
         (alpha * 255).toInt(), (red * 255).toInt(), (green * 255).toInt(), (blue * 255).toInt(),
     )
+
+/* ------------------------------------------------------ cite picker */
+
+/**
+ * The citation picker: a search field over citeCandidates (title, kind
+ * badge, "matched by alias" hint), inserting "[[Title]]" on tap, plus a
+ * "Copy this note's citation" action. Keyboard: arrows + Enter, Escape.
+ */
+@Composable
+private fun CiteNoteDialog(
+    vm: AppViewModel,
+    onInsert: (String) -> Unit,
+    onCopySelf: () -> Unit,
+    onClose: () -> Unit,
+) {
+    var query by remember { mutableStateOf("") }
+    var sel by remember { mutableStateOf(0) }
+    val candidates = remember(query, vm.notes, vm.linkIndex) {
+        NotesLinks.citeCandidates(vm.linkIndex, vm.notes, query)
+    }
+    // keep the highlight inside bounds as the list filters
+    if (sel >= candidates.size) sel = 0
+
+    AlertDialog(
+        onDismissRequest = onClose,
+        title = { Text("Cite a note") },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it; sel = 0 },
+                    placeholder = { Text("Search notes…") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                )
+                Spacer(Modifier.size(8.dp))
+                if (candidates.isEmpty()) {
+                    Text(
+                        "No matching notes.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    LazyColumn(Modifier.fillMaxWidth().heightIn(240.dp)) {
+                        items(candidates.size) { i ->
+                            val c = candidates[i]
+                            Surface(
+                                color = if (i == sel) MaterialTheme.colorScheme.primaryContainer
+                                else MaterialTheme.colorScheme.surface,
+                                shape = MaterialTheme.shapes.small,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 1.dp),
+                                onClick = { onInsert(c.title) },
+                            ) {
+                                Row(
+                                    Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    Text(
+                                        c.title,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        maxLines = 1,
+                                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                    if (c.kind != "markdown") {
+                                        Text(
+                                            c.kind,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.primary,
+                                        )
+                                    }
+                                    if (c.matchedBy == "alias") {
+                                        Text(
+                                            "alias",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.tertiary,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Spacer(Modifier.size(8.dp))
+                TextButton(onClick = onCopySelf) {
+                    Text("Copy this note’s citation", style = MaterialTheme.typography.labelMedium)
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onClose) { Text("Cancel") }
+        },
+    )
+}

@@ -13,8 +13,8 @@ android {
         applicationId = "site.funshare.notes"
         minSdk = 26
         targetSdk = 35
-        versionCode = 25
-        versionName = "1.24"
+        versionCode = 29
+        versionName = "1.28"
     }
 
     signingConfigs {

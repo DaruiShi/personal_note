@@ -11,6 +11,7 @@
   <link rel="stylesheet" href="/style.css">
   <script src="/links.js" defer></script>
   <script src="/timeline.js" defer></script>
+  <script src="/gallery.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
@@ -51,6 +52,9 @@
       </button>
       <button class="new-note-btn ghost" id="new-timeline-btn" type="button" aria-label="New timeline note">
         <span class="ic" id="new-timeline-ic"></span><span>Timeline</span>
+      </button>
+      <button class="new-note-btn ghost" id="new-gallery-btn" type="button" aria-label="New gallery note">
+        <span class="ic" id="new-gallery-ic"></span><span>Gallery</span>
       </button>
 
       <div class="search-box">
@@ -110,6 +114,7 @@
                 <button id="font-plus" type="button" aria-label="Larger preview text" title="Larger">+</button>
               </div>
               <button class="icon-btn" id="share-btn" title="Share note" aria-label="Share note"></button>
+              <button class="icon-btn" id="copy-cite-btn" title="Copy citation" aria-label="Copy citation"></button>
               <button class="icon-btn" id="history-btn" title="Version history" aria-label="Version history"></button>
               <button class="icon-btn danger" id="delete-btn" title="Delete note" aria-label="Delete note"></button>
             </div>
@@ -141,6 +146,30 @@
               <input type="date" id="tl-jump" class="tl-jump" aria-label="Jump to date">
             </div>
             <div class="tl-scroller" id="tl-scroller" tabindex="0" aria-label="Timeline dates"></div>
+          </div>
+          <div id="gallery" class="gallery hidden">
+            <div class="g-bar">
+              <button class="btn sm primary" id="g-new" type="button">New card</button>
+              <span class="g-count" id="g-count"></span>
+              <span class="g-hint" id="g-hint">Drag cards to reorder</span>
+            </div>
+            <div class="g-grid" id="g-grid" role="list" aria-label="Gallery cards"></div>
+            <div class="g-detail hidden" id="g-detail">
+              <div class="g-detail-head">
+                <button class="icon-btn" id="g-back" type="button" aria-label="Back to overview"></button>
+                <input id="g-title" class="g-title-input" placeholder="Card title" maxlength="200" autocomplete="off">
+                <button class="icon-btn danger" id="g-delete" type="button" aria-label="Delete card"></button>
+              </div>
+              <textarea id="g-content" class="g-content-input" placeholder="Card content&hellip;" rows="8"></textarea>
+              <div class="g-tags" id="g-tags"></div>
+              <input id="g-tag-input" class="g-tag-input" placeholder="Add a tag and press Enter" autocomplete="off">
+              <div class="g-colors" id="g-colors" role="group" aria-label="Card colour"></div>
+              <div class="g-detail-actions">
+                <button class="btn" id="g-move-left" type="button">Move earlier</button>
+                <button class="btn" id="g-move-right" type="button">Move later</button>
+                <button class="btn primary" id="g-add" type="button">Add</button>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -292,6 +321,21 @@
     </div>
   </div>
 
+  <!-- ======================= citation popovers / modal ======================= -->
+  <div id="cite-suggest" class="cite-suggest hidden" role="listbox" aria-label="Citation suggestions"></div>
+  <div id="cite-preview" class="cite-preview hidden" role="tooltip"></div>
+
+  <div class="modal-backdrop hidden" id="cite-modal">
+    <div class="modal cite-modal" role="dialog" aria-modal="true">
+      <h3>Cite a note</h3>
+      <input id="cite-search" placeholder="Search notes&hellip;" autocomplete="off" spellcheck="false">
+      <div id="cite-list" class="cite-list"></div>
+      <div class="modal-actions">
+        <button class="btn" id="cite-close" type="button">Cancel</button>
+      </div>
+    </div>
+  </div>
+
   <!-- ======================= confirm modal (last: always on top) ======================= -->
   <div class="modal-backdrop hidden" id="modal">
     <div class="modal" role="dialog" aria-modal="true">
@@ -305,5 +349,6 @@
   </div>
 
   <div class="toast" id="toast" role="status"><span id="toast-msg"></span><button type="button" class="toast-action hidden" id="toast-action"></button></div>
+  <span id="g-live" class="g-live" aria-live="polite"></span>
 </body>
 </html>

@@ -62,6 +62,13 @@ browser (desktop or phone), and keep your notes private behind a login.
 - Accounts: registration, sign-in, change password, sign out everywhere,
   delete account; admin panel to promote/demote/delete users and toggle
   open registration
+- **Gallery notes** — a third note kind: colour-coded cards in a responsive
+  grid, each with a title and a text preview. Click a card for its full
+  content; drag cards to reorder (or use Alt+Arrow / the move buttons), tag
+  them individually, and recolour them from a 12-colour palette. Adding a
+  card with an empty title or no tags asks the server to generate them with
+  MiniMax (M3.1-Flash); without a key, the title falls back to the first
+  words of the content.
 - **Timeline notes** — a second note kind organised by date: it opens on
   today, scrolls horizontally between dates, and holds a list of items per
   date that can be added, edited, moved, checked off, and deleted in place.
@@ -73,11 +80,12 @@ browser (desktop or phone), and keep your notes private behind a login.
 
 ### Note types
 
-Notes are either plain **markdown** notes (the default; `kind` absent) or
-**timeline** notes (`kind: "timeline"`, items in `note.timeline.items`). A
+Notes are plain **markdown** notes (the default; `kind` absent), **timeline**
+notes, or **gallery** notes (`kind: "timeline"`, items in `note.timeline.items`). A
 timeline's markdown `content` is a read-only mirror the server derives from
 its items — every save regenerates it, so sharing, trash, and export all
-keep working. The Android app (v1.20+) edits timelines natively; older
+keep working. The Android app (v1.20+) edits timelines natively and shows galleries as
+the mirror; older
 Android builds see the mirror and are refused with a clear message if they
 try to write. Up to 5000 items per note, each with plain text up to 4000
 characters on a `YYYY-MM-DD` date.
@@ -88,6 +96,13 @@ characters on a `YYYY-MM-DD` date.
   text) renders as a link to that note — titles match ignoring case and
   whitespace. Clicking a link to a note that doesn't exist offers to create
   it. Links inside code spans or fenced code blocks stay literal.
+- **Citations that survive renames** — the server records each note's
+  previous titles as aliases, so `[[Old Name]]` keeps pointing at the note
+  (and displays its current title) after a rename; backlinks keep flowing.
+  Typing `[[` in the editor opens an autocomplete picker (keyboard or
+  mouse), the toolbar's quote button opens a search dialog, the chain
+  button copies `[[Title]]` to the clipboard, and hovering or tab-focusing
+  a citation shows a preview card of the target note.
 - **Backlinks**: a note's preview ends with a "Linked from" section listing
   every other note that wikilinks to it, each with a snippet around the
   link, plus a line of this note's own outgoing links.
@@ -201,7 +216,7 @@ next to `server.js`, put your MiniMax API key in `llm.apiKey`, and restart:
 {
   "llm": {
     "enabled": true,
-    "baseUrl": "https://api.minimax.io/v1",
+    "baseUrl": "https://api.minimax.cn/v1",
     "model": "MiniMax-M3.1-Flash",
     "apiKey": "YOUR KEY",
     "timeoutMs": 25000,
@@ -214,17 +229,24 @@ next to `server.js`, put your MiniMax API key in `llm.apiKey`, and restart:
 
 - `chmod 600 config.json` — it holds a secret. The file is read once at
   startup and is gitignored; `config.example.json` is the tracked template.
-- `baseUrl` must match the platform the key belongs to: international keys
-  use `https://api.minimax.io/v1`; keys from the mainland console
-  (platform.minimaxi.com) use `https://api.minimaxi.com/v1` — a key on the
-  wrong platform fails with 401.
+- `baseUrl` must match the platform the key belongs to. The default (and
+  the example) is the mainland platform, `https://api.minimax.cn/v1`
+  (`api.minimaxi.com` is the same platform under an older domain);
+  international keys need `https://api.minimax.io/v1` instead. A key on the wrong platform fails
+  with 401 — the server detects exactly this case and retries once against
+  the other platform, so a mismatched `baseUrl` keeps working; a genuinely
+  invalid key fails with a message naming both URLs.
 - The `thinking` request parameter is omitted by default (MiniMax-M3.1-Flash
   requires adaptive thinking and rejects `{"type":"disabled"}` with a 400).
   Set `"thinking": {...}` in the config only if your model needs it pinned.
 - **Privacy:** when you use Paste & parse, the pasted text is sent to
-  MiniMax to extract dates; nothing else from the note is sent.
-- Each account is limited to `requestsPerHourPerUser` parses per hour
-  (in-memory; the counter resets on restart).
+  MiniMax to extract dates; nothing else from the note is sent. Likewise,
+  when a card's title or tags are generated, that card's content is sent
+  to MiniMax; nothing else is sent. Without a key, gallery titles fall
+  back to the first words of the content.
+- Each account is limited to `requestsPerHourPerUser` timeline parses and
+  `suggestPerHourPerUser` gallery suggestions per hour (in-memory; the
+  counters reset on restart).
 - Without the file, an empty key, or `enabled: false`, the server starts
   normally and the parse button falls back to a basic local parser
   (leading `YYYY-MM-DD`, `M/D`, `M月D日`, `今天/昨天/前天`, `星期X` dates).
@@ -289,7 +311,7 @@ test/                     node:test suite (npm test)
 ## Android app
 
 A native Android client lives in [`android-app/`](android-app/README.md) —
-the signed APK is `android-app/FunshareNotes-v1.24.apk`. It connects to this
+the signed APK is `android-app/FunshareNotes-v1.28.apk`. It connects to this
 server's JSON API with the same accounts and notes as the website, and its
 server address is configurable on the sign-in screen.
 

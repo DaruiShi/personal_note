@@ -85,9 +85,23 @@ the phone app share one account and the same notes.
   link index is maintained client-side over the cached notes. A preview
   ends with a "Linked from" section listing notes that wikilink to it,
   each with a snippet, plus a chips line of the note's own outgoing links.
+- **Rename-proof citations** — the server records previous titles as
+  aliases, so a `[[link]]` written before a rename keeps opening (and,
+  unlabelled, displays) the target's current title, and backlinks keep
+  flowing. The markdown toolbar's "Cite note" dialog searches titles and
+  aliases and inserts the citation at the end of the text; it can also
+  copy this note's own `[[citation]]` to the clipboard. Citations inside
+  timeline item rows are tappable and title-healed too.
 - **Daily notes** — the calendar action on the notes screen opens (or
   creates) today's note titled `YYYY-MM-DD`; while such a note is open, a
   ‹ label › Today bar steps between days. Daily notes are plain notes.
+- **Gallery notes** — the grid action creates a colour-card gallery:
+  a responsive grid of cards (title, preview, up to three tag chips) opens
+  into a detail editor with title, content, tags, twelve colour swatches
+  and move-earlier/later reordering. Adding a card with an empty title or
+  no tags asks the server's AI for them when configured; otherwise the
+  title falls back to the first words of the content. Saves carry
+  `kind: gallery` + cards; conflicts keep the existing dialog.
 - **Timeline notes** — the timeline action creates a date-organised note:
   swipe between date pages (items + today + visited), check items done,
   add / edit / move / delete them with optional HH:MM-HH:MM time ranges
@@ -152,7 +166,7 @@ In Android Studio: open the `android-app` folder and press Run.
 
 ## Install on the Redmi K80 Pro
 
-1. Copy `FunshareNotes-v1.24.apk` to the phone (USB transfer, 微信文件传输助手, etc.).
+1. Copy `FunshareNotes-v1.28.apk` to the phone (USB transfer, 微信文件传输助手, etc.).
 2. Open it from the file manager (小米文件管理 → 安装包). HyperOS will ask
    to allow installing from this source — allow it once.
 3. First screen: set the **server address** (see below), then sign in with

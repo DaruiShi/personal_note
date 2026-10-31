@@ -52,6 +52,6 @@ test('DELETE returns ok (the legacy client ignores the new fields)', async () =>
 test('/api/session advertises the new features', async () => {
   const r = await req(server.base, '', 'GET', '/api/session');
   assert.equal(r.status, 200);
-  assert.deepEqual(r.data.features, { trash: true, history: true, conflicts: true, qr: true, timeline: true, timelineParse: false });
+  assert.deepEqual(r.data.features, { trash: true, history: true, conflicts: true, qr: true, timeline: true, timelineParse: false, gallery: true, gallerySuggest: false });
   assert.equal(typeof r.data.trashRetentionDays, 'number');
 });

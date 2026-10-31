@@ -10,8 +10,8 @@ test('parseWikilinks: plain and labelled links, trimmed', () => {
   assert.deepEqual(
     L.parseWikilinks('See [[ My note ]] and [[Other|the other one]].'),
     [
-      { target: 'My note', label: 'My note' },
-      { target: 'Other', label: 'the other one' },
+      { target: 'My note', label: 'My note', explicit: false },
+      { target: 'Other', label: 'the other one', explicit: true },
     ],
   );
 });
@@ -26,7 +26,7 @@ test('parseWikilinks: duplicates collapse to the first occurrence', () => {
 test('parseWikilinks: fenced code and inline code are not links', () => {
   assert.deepEqual(L.parseWikilinks('before\n```\n[[Hidden]] and `[[Also hidden]]`\n```\nafter'), []);
   assert.deepEqual(L.parseWikilinks('a `[[X]]` b'), []);
-  assert.deepEqual(L.parseWikilinks('```js\n[[X]]\n```\n[[Real]]'), [{ target: 'Real', label: 'Real' }]);
+  assert.deepEqual(L.parseWikilinks('```js\n[[X]]\n```\n[[Real]]'), [{ target: 'Real', label: 'Real', explicit: false }]);
 });
 
 test('parseWikilinks: unclosed brackets and empty targets are not links', () => {
@@ -109,4 +109,119 @@ test('extractSnippet: label from plain target when unlabelled', () => {
 test('parseWikilinks: links across many lines keep first-seen order', () => {
   const links = L.parseWikilinks('[[B]]\n[[A]]\n[[B|b2]]');
   assert.deepEqual(links.map((l) => l.target), ['B', 'A']);
+});
+
+/* ---------------------------------------------- aliases and citations */
+
+test('alias resolution: a citation written before a rename still resolves', () => {
+  const notes = [
+    { id: 'a', title: 'New Name', aliases: ['Old Name', 'Middle'], content: '', updatedAt: 10 },
+    { id: 'b', title: 'Citer', content: 'see [[Old Name]]', updatedAt: 5 },
+  ];
+  const idx = L.buildLinkIndex(notes);
+  assert.equal(L.resolveTitle(idx, 'Old Name'), 'a');
+  assert.equal(L.resolveTitle(idx, 'middle'), 'a'); // case/whitespace-insensitive
+  assert.equal(L.resolveTitle(idx, 'New Name'), 'a');
+  // citation info carries the CURRENT title
+  assert.deepEqual(L.resolveCitation(idx, notes, 'Old Name'), { id: 'a', title: 'New Name', kind: 'markdown' });
+  assert.equal(L.resolveCitation(idx, notes, 'Nope'), null);
+});
+
+test('a real title always beats an alias; alias-vs-alias picks the newest', () => {
+  const idx = L.buildLinkIndex([
+    { id: 'real', title: 'Shared', content: '', updatedAt: 1 },
+    { id: 'other', title: 'Other', aliases: ['Shared'], content: '', updatedAt: 99 },
+  ]);
+  assert.equal(idx.byAlias.has(L.titleKey('Shared')), false);
+  assert.equal(L.resolveTitle(idx, 'Shared'), 'real');
+
+  const coll = L.buildLinkIndex([
+    { id: 'old', title: 'A', aliases: ['Ghost'], content: '', updatedAt: 1 },
+    { id: 'new', title: 'B', aliases: ['Ghost'], content: '', updatedAt: 50 },
+  ]);
+  assert.equal(coll.byAlias.get('ghost'), 'new');
+});
+
+test('a note never aliases its own current title', () => {
+  const idx = L.buildLinkIndex([{ id: 'n', title: 'Title', aliases: ['Title', 'title'], content: '', updatedAt: 1 }]);
+  assert.equal(idx.byAlias.size, 0);
+});
+
+test('inbound backlinks flow through an alias', () => {
+  const notes = [
+    { id: 'a', title: 'New', aliases: ['Old'], content: '', updatedAt: 10 },
+    { id: 'b', title: 'Citer', content: 'x [[Old]] y', updatedAt: 5 },
+  ];
+  const idx = L.buildLinkIndex(notes);
+  assert.deepEqual([...idx.inbound.get('a')], ['b']);
+  const rows = L.inboundFor(idx, 'a', notes);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].snippet, 'x Old y'); // snippet found via the alias-written link
+});
+
+test('citeCandidates ranking: exact, starts, contains, alias; limit; empty query', () => {
+  const notes = [
+    { id: '1', title: 'Alpha', content: '', updatedAt: 1 },
+    { id: '2', title: 'Beta alpha', content: '', updatedAt: 2 },
+    { id: '3', title: 'Gamma', aliases: ['alpha draft'], content: '', updatedAt: 3 },
+    { id: '4', title: 'Not a match', content: '', updatedAt: 9 },
+  ];
+  const idx = L.buildLinkIndex(notes);
+  const rows = L.citeCandidates(idx, notes, 'alpha');
+  assert.deepEqual(rows.map((r) => r.id), ['1', '2', '3']); // exact > starts > alias
+  assert.equal(rows[2].matchedBy, 'alias');
+  // limit
+  assert.equal(L.citeCandidates(idx, notes, '').length, 4); // empty = recent, all
+  assert.equal(L.citeCandidates(idx, notes, '', 2).length, 2);
+  const recent = L.citeCandidates(idx, notes, '');
+  assert.deepEqual(recent.map((r) => r.updatedAt), [9, 3, 2, 1]); // newest first
+});
+
+test('citationFor: rejects titles containing brackets or pipe, never mangles', () => {
+  assert.deepEqual(L.citationFor({ title: 'Fine Title' }), { text: '[[Fine Title]]' });
+  for (const bad of ['Brack[et]', 'Close]', 'Pipe|', '  ', '']) {
+    const r = L.citationFor({ title: bad });
+    assert.equal(r.blocked, true, JSON.stringify(bad));
+    assert.equal(r.text, '');
+    assert.ok(r.reason);
+  }
+  assert.equal(L.citationFor(null).blocked, true);
+});
+
+test('parseWikilinks reports whether the label was explicit', () => {
+  const plain = L.parseWikilinks('[[Target]]')[0];
+  assert.equal(plain.explicit, false);
+  assert.equal(plain.label, 'Target');
+  const labelled = L.parseWikilinks('[[Target|shown]]')[0];
+  assert.equal(labelled.explicit, true);
+  assert.equal(labelled.label, 'shown');
+});
+
+test('regression: title-only citations from before aliases still resolve', () => {
+  const idx = L.buildLinkIndex([
+    { id: 'x', title: 'Plain Note', content: 'self [[Plain Note]] [[Other]]', updatedAt: 1 },
+    { id: 'y', title: 'Other', content: '', updatedAt: 2 },
+  ]);
+  assert.equal(L.resolveTitle(idx, 'Plain Note'), 'x');
+  assert.equal(L.resolveTitle(idx, 'other'), 'y');
+  assert.deepEqual([...idx.inbound.get('y')], ['x']);
+});
+
+test('citeify: escapes everything, links only citations, survives XSS payloads', () => {
+  const resolve = (t) => (t === 'Known' ? 'id1' : null);
+  const out = L.citeify('see [[Known]] and [[Missing|x]] plus <script>alert(1)</script>', resolve);
+  assert.equal(out,
+    'see <a class="wikilink" href="#" data-wikilink="Known">Known</a> and ' +
+    '<a class="wikilink missing" href="#" data-wikilink="Missing" title="Create this note">x</a> ' +
+    'plus &lt;script&gt;alert(1)&lt;/script&gt;');
+  // an injection right after a citation stays escaped
+  assert.equal(L.citeify('[[a]]<img onerror=x>', resolve),
+    '<a class="wikilink missing" href="#" data-wikilink="a" title="Create this note">a</a>&lt;img onerror=x&gt;');
+  // unterminated [[ is literal text
+  assert.equal(L.citeify('unterminated [[Nope', resolve), 'unterminated [[Nope');
+  // ampersands and tags outside citations stay escaped
+  assert.equal(L.citeify('plain & <b>text</b>', resolve), 'plain &amp; &lt;b&gt;text&lt;/b&gt;');
+  // a label containing markup is escaped inside the anchor
+  assert.equal(L.citeify('[[Known|<i>lbl</i>]]', resolve),
+    '<a class="wikilink" href="#" data-wikilink="Known">&lt;i&gt;lbl&lt;/i&gt;</a>');
 });

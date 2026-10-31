@@ -20,6 +20,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.ClickableText
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -55,7 +56,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import kotlinx.coroutines.launch
@@ -320,6 +324,61 @@ private fun TimelineDatePage(
 }
 
 /**
+ * Plain text with live citations: [[Target]] spans render in the accent
+ * colour and open the target note on tap — the Compose counterpart of the
+ * web's citeify(). Unresolvable targets stay plain struck-through text
+ * (the create-note flow needs the editor, so we do not offer it here).
+ */
+@Composable
+private fun CiteText(
+    text: String,
+    done: Boolean,
+    vm: AppViewModel,
+    modifier: Modifier = Modifier,
+) {
+    val base = if (done) MaterialTheme.colorScheme.onSurfaceVariant
+    else MaterialTheme.colorScheme.onSurface
+    val accent = MaterialTheme.colorScheme.primary
+    val annotated = remember(text, vm.linkIndex, vm.notes) {
+        buildAnnotatedString {
+            for (part in NotesLinks.citeifiedParts(
+                text,
+                resolve = { vm.resolveWikilink(it) },
+                resolveDisplay = { t -> NotesLinks.resolveCitation(vm.linkIndex, vm.notes, t)?.title },
+            )) {
+                if (part.citationId == null) {
+                    withStyle(
+                        SpanStyle(
+                            color = base,
+                            textDecoration = if (done) TextDecoration.LineThrough else null,
+                        ),
+                    ) { append(part.text) }
+                } else {
+                    val deco = if (done) {
+                        TextDecoration.combine(listOf(TextDecoration.LineThrough, TextDecoration.Underline))
+                    } else TextDecoration.Underline
+                    withStyle(SpanStyle(color = accent, textDecoration = deco)) {
+                        pushStringAnnotation("citation", part.target)
+                        append(part.text)
+                        pop()
+                    }
+                }
+            }
+        }
+    }
+    ClickableText(
+        text = annotated,
+        style = MaterialTheme.typography.bodyMedium,
+        modifier = modifier,
+        onClick = { offset ->
+            annotated.getStringAnnotations("citation", offset, offset)
+                .firstOrNull()
+                ?.let { vm.openWikilink(it.item) {} }
+        },
+    )
+}
+
+/**
  * Compact HH:MM field — placeholder instead of a floating label so the row
  * stays one line tall; 88dp fits exactly 5 characters.
  */
@@ -412,12 +471,10 @@ private fun TimelineItemRow(vm: AppViewModel, item: TimelineItem, onEdit: () -> 
                 }
                 Spacer(Modifier.size(8.dp))
             }
-            Text(
-                item.text,
-                style = MaterialTheme.typography.bodyMedium,
-                color = if (item.done) MaterialTheme.colorScheme.onSurfaceVariant
-                else MaterialTheme.colorScheme.onSurface,
-                textDecoration = if (item.done) TextDecoration.LineThrough else null,
+            CiteText(
+                text = item.text,
+                done = item.done,
+                vm = vm,
                 modifier = Modifier
                     .weight(1f)
                     .padding(vertical = 6.dp),

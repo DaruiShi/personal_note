@@ -63,6 +63,54 @@ data class TimelineItem(
     }
 }
 
+/**
+ * One gallery card: a title, plain-text content, per-card tags, and a
+ * palette colour key (never a raw hex — both themes stay readable).
+ * Array position is the display order.
+ */
+data class GalleryCard(
+    val id: String,
+    val title: String,
+    val content: String,
+    val tags: List<String> = emptyList(),
+    val color: String = "slate",
+    val createdAt: Long = 0,
+    val updatedAt: Long = 0,
+) {
+    companion object {
+        fun fromJson(o: JSONObject): GalleryCard = GalleryCard(
+            id = o.optString("id"),
+            title = o.optString("title"),
+            content = o.optString("content"),
+            tags = run {
+                val a = o.optJSONArray("tags") ?: return@run emptyList()
+                List(a.length()) { a.optString(it) }.filter { it.isNotEmpty() }
+            },
+            color = o.optString("color").ifEmpty { "slate" },
+            createdAt = o.optLong("createdAt"),
+            updatedAt = o.optLong("updatedAt"),
+        )
+
+        fun listFromJson(o: JSONObject?): List<GalleryCard> {
+            val a = o?.optJSONArray("items") ?: return emptyList()
+            return List(a.length()) { fromJson(a.optJSONObject(it) ?: return emptyList()) }
+        }
+
+        fun listToJson(items: List<GalleryCard>): JSONObject {
+            val a = JSONArray()
+            items.forEach {
+                a.put(
+                    JSONObject().put("id", it.id).put("title", it.title).put("content", it.content)
+                        .put("tags", JSONArray(it.tags))
+                        .put("color", it.color)
+                        .put("createdAt", it.createdAt).put("updatedAt", it.updatedAt),
+                )
+            }
+            return JSONObject().put("items", a)
+        }
+    }
+}
+
 data class Note(
     val id: String,
     val title: String,
@@ -77,13 +125,19 @@ data class Note(
     val rev: Int = 0,
     /** Non-null while the note sits in the server-side trash. */
     val deletedAt: Long? = null,
-    /** "timeline" for timeline notes; null = plain markdown note. */
+    /** "timeline" / "gallery" for structured notes; null = plain markdown. */
     val kind: String? = null,
     /** Items, present only on kind == "timeline". Content is the derived mirror. */
     val timeline: List<TimelineItem>? = null,
+    /** Cards, present only on kind == "gallery". Content is the derived mirror. */
+    val gallery: List<GalleryCard>? = null,
+    /** Previous titles (server-managed rename aliases); citations written
+     *  before a rename keep resolving through them. Never client-writable. */
+    val aliases: List<String>? = null,
 ) {
     val isLocal: Boolean get() = id.startsWith("local:")
     val isTimeline: Boolean get() = kind == "timeline"
+    val isGallery: Boolean get() = kind == "gallery"
 
     fun toJson(): JSONObject {
         val o = JSONObject()
@@ -98,6 +152,8 @@ data class Note(
             .put("rev", rev)
         if (kind != null) o.put("kind", kind)
         if (kind == "timeline") o.put("timeline", TimelineItem.listToJson(timeline ?: emptyList()))
+        if (kind == "gallery") o.put("gallery", GalleryCard.listToJson(gallery ?: emptyList()))
+        if (!aliases.isNullOrEmpty()) o.put("aliases", JSONArray(aliases))
         return o
     }
 
@@ -120,6 +176,11 @@ data class Note(
                 deletedAt = if (o.has("deletedAt") && !o.isNull("deletedAt")) o.optLong("deletedAt") else null,
                 kind = kind,
                 timeline = if (kind == "timeline") TimelineItem.listFromJson(o.optJSONObject("timeline")) else null,
+                gallery = if (kind == "gallery") GalleryCard.listFromJson(o.optJSONObject("gallery")) else null,
+                aliases = run {
+                    val a = o.optJSONArray("aliases") ?: return@run null
+                    List(a.length()) { a.optString(it) }.filter { it.isNotEmpty() }.ifEmpty { null }
+                },
             )
         }
     }
@@ -144,6 +205,8 @@ data class SessionInfo(
     val featuresQr: Boolean = false,
     /** Server has an LLM config for timeline "Paste & parse". */
     val featuresTimelineParse: Boolean = false,
+    /** Server has an LLM config for gallery title/tag suggestions. */
+    val featuresGallerySuggest: Boolean = false,
     /**
      * Canonical public origin the server wants in share links (its
      * PUBLIC_BASE_URL); null when the server did not advertise one.
@@ -165,6 +228,7 @@ data class SessionInfo(
             registrationOpen = o.optBoolean("registrationOpen"),
             featuresQr = o.optJSONObject("features")?.optBoolean("qr") == true,
             featuresTimelineParse = o.optJSONObject("features")?.optBoolean("timelineParse") == true,
+            featuresGallerySuggest = o.optJSONObject("features")?.optBoolean("gallerySuggest") == true,
             publicBaseUrl = o.optString("publicBaseUrl").ifEmpty { null },
         )
     }

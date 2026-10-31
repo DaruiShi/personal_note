@@ -39,7 +39,19 @@ try {
 
 // Timeline-note pure logic and the MiniMax client (both stdlib only).
 const timeline = require('./lib/timeline');
+const gallery = require('./lib/gallery');
+const alias = require('./lib/alias');
 const llm = require('./lib/llm');
+
+// Structured note kinds (timeline, gallery) share one set of write rules:
+// their data lives in a field named after the kind and note.content is a
+// server-derived mirror. A write without the data field would desync the
+// mirror, so it is refused; conversions are explicit.
+const STRUCTURED_KINDS = {
+  [timeline.TIMELINE_KIND]: { kind: timeline.TIMELINE_KIND, field: 'timeline', normalize: timeline.normalizeTimeline },
+  [gallery.GALLERY_KIND]: { kind: gallery.GALLERY_KIND, field: 'gallery', normalize: gallery.normalizeGallery },
+};
+const isKnownKind = (k) => k === 'markdown' || STRUCTURED_KINDS[k] != null;
 
 /* ------------------------------------------------------------------ config */
 
@@ -210,6 +222,10 @@ async function loadDb() {
       // trashed note. Notes written before they existed start at rev 1 / live.
       n.rev = (Number.isInteger(n.rev) && n.rev >= 1) ? n.rev : 1;
       n.deletedAt = (typeof n.deletedAt === 'number') ? n.deletedAt : null;
+      // Rename aliases: normalised on load so hand-edited junk (non-strings,
+      // empties, duplicates) cannot poison citation resolution.
+      n.aliases = alias.normalizeAliases(n.aliases);
+      if (n.aliases.length === 0) delete n.aliases;
     }
   } catch (err) {
     if (err.code !== 'ENOENT') console.error(`Warning: could not parse ${DB_FILE} (${err.message}); starting with an empty store.`);
@@ -287,6 +303,13 @@ function historyEntry(note, kind, state = null) {
   if (s.kind === timeline.TIMELINE_KIND) {
     e.noteKind = timeline.TIMELINE_KIND;
     e.timeline = { items: Array.isArray(s.timeline && s.timeline.items) ? s.timeline.items : [] };
+  }
+  if (s.kind === gallery.GALLERY_KIND) {
+    e.noteKind = gallery.GALLERY_KIND;
+    e.gallery = { items: Array.isArray(s.gallery && s.gallery.items) ? s.gallery.items : [] };
+  }
+  if (Array.isArray(s.aliases) && s.aliases.length) {
+    e.aliases = alias.normalizeAliases(s.aliases);
   }
   return e;
 }
@@ -583,6 +606,11 @@ const loginFailures = new Map();
 const parseHits = new Map(); // userId -> [ts, ...] within the last hour
 let parseInFlight = 0;
 
+/* Gallery suggestions: separate buckets so per-card suggest traffic can
+   never starve timeline parsing. */
+const suggestHits = new Map(); // userId -> [ts, ...] within the last hour
+let suggestInFlight = 0;
+
 function localTodayKey() {
   const d = new Date();
   const p = (n) => String(n).padStart(2, '0');
@@ -703,7 +731,7 @@ async function handleApi(req, res, pathname) {
       authenticated: !!user,
       user: user ? publicUser(user) : null,
       registrationOpen: db.settings.registrationOpen,
-      features: { trash: true, history: true, conflicts: true, qr: qr != null, timeline: true, timelineParse: llmConfig != null },
+      features: { trash: true, history: true, conflicts: true, qr: qr != null, timeline: true, timelineParse: llmConfig != null, gallery: true, gallerySuggest: llmConfig != null },
       trashRetentionDays: db.settings.trashRetentionDays,
       publicBaseUrl,
     });
@@ -952,8 +980,8 @@ async function handleApi(req, res, pathname) {
       return sendJson(res, 400, { error: 'Note limit reached' });
     }
     const body = await readJson(req);
-    if ('kind' in body && body.kind !== 'markdown' && body.kind !== timeline.TIMELINE_KIND) {
-      return sendJson(res, 400, { error: 'kind must be "markdown" or "timeline"', code: 'invalid_kind' });
+    if ('kind' in body && body.kind !== 'markdown' && !STRUCTURED_KINDS[body.kind]) {
+      return sendJson(res, 400, { error: 'kind must be "markdown", "timeline" or "gallery"', code: 'invalid_kind' });
     }
     const clean = sanitizeNote(body);
     const now = Date.now();
@@ -967,6 +995,15 @@ async function handleApi(req, res, pathname) {
       }
       note.kind = timeline.TIMELINE_KIND;
       note.timeline = { items: norm.items };
+      note.content = norm.markdown;
+    }
+    if (body.kind === gallery.GALLERY_KIND) {
+      const norm = gallery.normalizeGallery(body.gallery || { items: [] });
+      if (!norm.ok) {
+        return sendJson(res, 400, { error: norm.message, code: norm.code, ...(norm.index != null ? { index: norm.index } : {}) });
+      }
+      note.kind = gallery.GALLERY_KIND;
+      note.gallery = { items: norm.items };
       note.content = norm.markdown;
     }
     db.notes.push(note);
@@ -987,36 +1024,41 @@ async function handleApi(req, res, pathname) {
       if (note.deletedAt != null) {
         return sendJson(res, 409, { error: 'This note is in the trash', code: 'trashed', note });
       }
-      /* Timeline write rules. A client that does not know about timelines
+      /* Structured-kind write rules (timeline, gallery — see
+         STRUCTURED_KINDS). A client that does not know about the kind
          (the Android app) would replace the mirror text and desync it from
          the items — refuse instead, before any history entry is written. */
-      const noteIsTimeline = note.kind === timeline.TIMELINE_KIND;
-      if (noteIsTimeline && !('timeline' in body)) {
-        return sendJson(res, 409, { error: 'This timeline note can only be edited in the web app', code: 'timeline' });
+      const noteStruct = STRUCTURED_KINDS[note.kind] || null;
+      const noteField = noteStruct && noteStruct.field;
+      if (noteStruct && !(noteField in body)) {
+        return sendJson(res, 409, { error: `This ${note.kind} note can only be edited in the web app`, code: note.kind });
       }
-      if ('kind' in body && body.kind !== 'markdown' && body.kind !== timeline.TIMELINE_KIND) {
-        return sendJson(res, 400, { error: 'kind must be "markdown" or "timeline"', code: 'invalid_kind' });
+      if ('kind' in body && !isKnownKind(body.kind)) {
+        return sendJson(res, 400, { error: 'kind must be "markdown", "timeline" or "gallery"', code: 'invalid_kind' });
       }
-      if (noteIsTimeline && 'timeline' in body && body.timeline == null && body.kind !== 'markdown') {
-        return sendJson(res, 400, { error: 'timeline must be { items: [...] }; send kind "markdown" + timeline null to convert', code: 'invalid_timeline' });
+      if (noteStruct && noteField in body && body[noteField] == null && body.kind !== 'markdown') {
+        return sendJson(res, 400, { error: `${noteField} must be { items: [...] }; send kind "markdown" + ${noteField} null to convert`, code: `invalid_${noteField}` });
       }
-      if (!noteIsTimeline && body.kind === timeline.TIMELINE_KIND && 'timeline' in body && body.timeline == null) {
-        return sendJson(res, 400, { error: 'Converting a note to a timeline requires timeline: { items: [...] }', code: 'invalid_timeline' });
+      if (!noteStruct && STRUCTURED_KINDS[body.kind] && STRUCTURED_KINDS[body.kind].field in body && body[STRUCTURED_KINDS[body.kind].field] == null) {
+        return sendJson(res, 400, { error: `Converting a note to a ${body.kind} requires ${body.kind}: { items: [...] }`, code: `invalid_${body.kind}` });
       }
-      if (body.kind === 'markdown' && noteIsTimeline && 'timeline' in body && body.timeline != null) {
-        return sendJson(res, 409, { error: 'Converting a timeline to markdown requires timeline: null', code: 'timeline' });
+      if (body.kind === 'markdown' && noteStruct && noteField in body && body[noteField] != null) {
+        return sendJson(res, 409, { error: `Converting a ${note.kind} to markdown requires ${noteField}: null`, code: note.kind });
       }
-      if (body.kind === timeline.TIMELINE_KIND && !noteIsTimeline && !('timeline' in body)) {
-        return sendJson(res, 400, { error: 'Converting a note to a timeline requires a timeline field', code: 'invalid_kind' });
+      if (STRUCTURED_KINDS[body.kind] && !noteStruct && !(STRUCTURED_KINDS[body.kind].field in body)) {
+        return sendJson(res, 400, { error: `Converting a note to a ${body.kind} requires a ${body.kind} field`, code: 'invalid_kind' });
       }
-      let norm = null; // { items, markdown } when this write carries a timeline
-      if ((noteIsTimeline || body.kind === timeline.TIMELINE_KIND) && body.timeline != null) {
-        norm = timeline.normalizeTimeline(body.timeline);
+      // The kind this write targets: the note's own, or the one the body
+      // converts it to.
+      const target = noteStruct || STRUCTURED_KINDS[body.kind] || null;
+      let norm = null; // { items, markdown } when this write carries structured data
+      if (target && body[target.field] != null) {
+        norm = target.normalize(body[target.field]);
         if (!norm.ok) {
           return sendJson(res, 400, { error: norm.message, code: norm.code, ...(norm.index != null ? { index: norm.index } : {}) });
         }
       }
-      const dropTimeline = noteIsTimeline && body.kind === 'markdown' && 'timeline' in body && body.timeline == null;
+      const dropStruct = noteStruct && body.kind === 'markdown' && noteField in body && body[noteField] == null;
       // Concurrency: a body without rev is a legacy client (last-write-wins);
       // a rev that no longer matches lost a race — keep the losing payload in
       // history, never merge. The check runs immediately before the mutation
@@ -1026,21 +1068,30 @@ async function handleApi(req, res, pathname) {
           return sendJson(res, 400, { error: 'rev must be a number' });
         }
         if (body.rev !== note.rev) {
-          await appendHistory(note.id, historyEntry(note, 'rejected', { ...sanitizeNote(body), kind: body.kind, timeline: body.timeline, folderId: resolveFolderId(body.folderId, user) }));
+          await appendHistory(note.id, historyEntry(note, 'rejected', { ...sanitizeNote(body), kind: body.kind, timeline: body.timeline, gallery: body.gallery, folderId: resolveFolderId(body.folderId, user) }));
           return sendJson(res, 409, { error: 'This note was changed on another device', code: 'conflict', note });
         }
       }
       const entry = historyEntry(note, 'edit'); // the state before this update
+      const prevTitle = note.title;
       Object.assign(note, sanitizeNote(body), { updatedAt: Date.now() });
+      // Rename: remember the old title so existing citations keep resolving.
+      if (note.title !== prevTitle) {
+        note.aliases = alias.addAlias(note.aliases, prevTitle, note.title);
+        if (note.aliases.length === 0) delete note.aliases;
+      }
       if (norm) {
         // The mirror is always derived server-side; any client-supplied
-        // content for a timeline note is ignored.
-        note.kind = timeline.TIMELINE_KIND;
-        note.timeline = { items: norm.items };
+        // content for a structured note is ignored.
+        note.kind = target.kind;
+        note[target.field] = { items: norm.items };
         note.content = norm.markdown;
-      } else if (dropTimeline) {
+        for (const k of Object.keys(STRUCTURED_KINDS)) {
+          if (k !== target.kind) delete note[STRUCTURED_KINDS[k].field];
+        }
+      } else if (dropStruct) {
         delete note.kind;
-        delete note.timeline;
+        for (const k of Object.values(STRUCTURED_KINDS)) delete note[k.field];
       }
       // Only touch the folder when the client sends the field at all —
       // older clients (Android app) that don't know about folders must not
@@ -1156,6 +1207,17 @@ async function handleApi(req, res, pathname) {
 
   /* ----------------------------------------------------- timeline parse */
 
+  // Shared LLM failure mapping for the parse and suggest routes.
+  function sendLlmError(res, e) {
+    const code = ['llm_timeout', 'llm_unparsable', 'llm_rate_limited'].includes(e.code) ? e.code : 'llm_failed';
+    const status = code === 'llm_timeout' ? 504 : code === 'llm_rate_limited' ? 429 : 502;
+    sendJson(res, status, {
+      error: e.message || 'The AI request failed',
+      code,
+      ...(status === 429 ? { retryAfter: 60 } : {}),
+    });
+  }
+
   // Sends the pasted text (and nothing else) to the configured LLM and gets
   // dated items back. Disabled without config; rate-limited per user.
   if (pathname === '/api/timeline/parse' && method === 'POST') {
@@ -1194,15 +1256,56 @@ async function handleApi(req, res, pathname) {
     } catch (e) {
       // One line per call — user, count, duration, outcome; never the text.
       log(`timeline/parse user=${user.name} items=0 ms=${Date.now() - t0} ok=0 code=${e.code || 'llm_failed'}`);
-      const code = ['llm_timeout', 'llm_unparsable', 'llm_rate_limited'].includes(e.code) ? e.code : 'llm_failed';
-      const status = code === 'llm_timeout' ? 504 : code === 'llm_rate_limited' ? 429 : 502;
-      return sendJson(res, status, {
-        error: e.message || 'The AI request failed',
-        code,
-        ...(status === 429 ? { retryAfter: 60 } : {}),
-      });
+      return sendLlmError(res, e);
     } finally {
       parseInFlight -= 1;
+    }
+  }
+
+  /* ----------------------------------------------------- gallery suggest */
+
+  // Generates a title and/or tags for ONE card's content (and nothing else
+  // from the note). Separate rate-limit buckets from the timeline route:
+  // gallery use must not starve timeline parsing.
+  if (pathname === '/api/gallery/suggest' && method === 'POST') {
+    if (!llmConfig) {
+      return sendJson(res, 503, { error: 'AI suggestions are not configured on this server', code: 'llm_not_configured' });
+    }
+    if (suggestInFlight >= 2) {
+      return sendJson(res, 503, { error: 'The AI service is busy — try again in a moment', code: 'busy' });
+    }
+    const now = Date.now();
+    const hits = (suggestHits.get(user.id) || []).filter((t) => now - t < 3600 * 1000);
+    if (hits.length >= llmConfig.suggestPerHourPerUser) {
+      suggestHits.set(user.id, hits);
+      const retryAfter = Math.max(1, Math.ceil((hits[0] + 3600 * 1000 - now) / 60000));
+      return sendJson(res, 429, { error: 'Too many AI requests this hour — try again later', code: 'too_many_requests', retryAfter });
+    }
+    const body = await readJson(req, 64 * 1024);
+    const content = typeof body.content === 'string' ? body.content : '';
+    if (!content.trim()) {
+      return sendJson(res, 400, { error: 'Nothing to suggest from', code: 'empty_content' });
+    }
+    if (content.length > gallery.MAX_CONTENT) {
+      return sendJson(res, 413, { error: `Card content is longer than ${gallery.MAX_CONTENT} characters`, code: 'content_too_large' });
+    }
+    const need = body.need && typeof body.need === 'object' ? body.need : {};
+    const needTitle = need.title !== false;
+    const needTags = need.tags !== false;
+    const maxTags = Math.min(10, Math.max(1, Number.isInteger(body.maxTags) ? body.maxTags : 5));
+    hits.push(now);
+    suggestHits.set(user.id, hits);
+    suggestInFlight += 1;
+    const t0 = Date.now();
+    try {
+      const out = await llm.suggestMetadata({ content, needTitle, needTags, maxTags });
+      log(`gallery/suggest user=${user.name} need=${[needTitle ? 'title' : null, needTags ? 'tags' : null].filter(Boolean).join(',')} ms=${Date.now() - t0} ok=1`);
+      return sendJson(res, 200, { ...out, model: llmConfig.model });
+    } catch (e) {
+      log(`gallery/suggest user=${user.name} need=${[needTitle ? 'title' : null, needTags ? 'tags' : null].filter(Boolean).join(',')} ms=${Date.now() - t0} ok=0 code=${e.code || 'llm_failed'}`);
+      return sendLlmError(res, e);
+    } finally {
+      suggestInFlight -= 1;
     }
   }
 
@@ -1254,6 +1357,11 @@ async function handleApi(req, res, pathname) {
     note.tags = sanitizeTags(revision.tags);
     note.pinned = revision.pinned === true;
     note.folderId = resolveFolderId(revision.folderId, user);
+    if (Array.isArray(revision.aliases) && revision.aliases.length) {
+      note.aliases = alias.normalizeAliases(revision.aliases);
+    } else {
+      delete note.aliases;
+    }
     if (revision.noteKind === timeline.TIMELINE_KIND && revision.timeline) {
       // Restoring a timeline revision restores the items; the mirror is
       // regenerated. Old sidecars pre-dating timelines have no noteKind
@@ -1262,9 +1370,15 @@ async function handleApi(req, res, pathname) {
       note.kind = timeline.TIMELINE_KIND;
       note.timeline = { items: norm.ok ? norm.items : [] };
       note.content = norm.ok ? norm.markdown : '';
+    } else if (revision.noteKind === gallery.GALLERY_KIND && revision.gallery) {
+      const norm = gallery.normalizeGallery(revision.gallery);
+      note.kind = gallery.GALLERY_KIND;
+      note.gallery = { items: norm.ok ? norm.items : [] };
+      note.content = norm.ok ? norm.markdown : '';
     } else {
       delete note.kind;
       delete note.timeline;
+      delete note.gallery;
     }
     note.updatedAt = Date.now();
     note.rev += 1;

@@ -31,6 +31,7 @@ import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AdminPanelSettings
 import androidx.compose.material.icons.filled.Event
+import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Timeline
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
@@ -238,6 +239,13 @@ fun NotesScreen(vm: AppViewModel) {
                             Icon(
                                 Icons.Filled.Timeline,
                                 contentDescription = "New timeline note",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        IconButton(onClick = { vm.newGalleryNote() }) {
+                            Icon(
+                                Icons.Filled.GridView,
+                                contentDescription = "New gallery note",
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }

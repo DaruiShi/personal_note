@@ -49,8 +49,9 @@
         const key = titleKey(target);
         if (seen.has(key)) continue;
         seen.add(key);
+        const explicit = m[2] != null && m[2].trim() !== '';
         const label = (m[2] != null ? m[2].trim() : '') || target;
-        out.push({ target, label });
+        out.push({ target, label, explicit });
       }
     }
     return out;
@@ -58,11 +59,17 @@
 
   /* -------------------------------------------------------- link index */
 
-  // { byTitle: Map<titleKey, noteId>, outbound: Map<noteId, target[]>,
-  //   inbound: Map<noteId, Set<noteId>> }
+  // { byTitle: Map<titleKey, noteId>, byAlias: Map<titleKey, noteId>,
+  //   outbound: Map<noteId, target[]>, inbound: Map<noteId, Set<noteId>> }
   // byTitle resolves duplicate titles to the newest updatedAt; notes with
   // empty titles are excluded from byTitle but still contribute outbound
   // links. Self-links do not create inbound entries.
+  //
+  // byAlias maps RENAME aliases (server-managed previous titles) the same
+  // way — a real title always beats an alias, a note's own current title is
+  // never its alias, and alias-vs-alias collisions pick the newest note —
+  // so a citation written before a rename keeps resolving and backlinks
+  // keep flowing. Lookup order is always byTitle first, then byAlias.
   function buildLinkIndex(notes) {
     const list = Array.isArray(notes) ? notes : [];
     const byTitle = new Map();
@@ -70,25 +77,129 @@
     titled.sort((a, b) => (a.updatedAt || 0) - (b.updatedAt || 0)); // newest wins
     for (const n of titled) byTitle.set(titleKey(n.title), n.id);
 
+    const byAlias = new Map();
+    const aliased = list
+      .filter((n) => n && Array.isArray(n.aliases))
+      .sort((a, b) => (a.updatedAt || 0) - (b.updatedAt || 0)); // newest wins
+    for (const n of aliased) {
+      for (const a of n.aliases) {
+        const key = titleKey(a);
+        if (!key || key === titleKey(n.title)) continue;
+        if (byTitle.has(key)) continue; // a real title always beats an alias
+        byAlias.set(key, n.id);
+      }
+    }
+
+    const resolveKey = (key) => {
+      if (key == null) return null;
+      const id = byTitle.get(key);
+      return id != null ? id : (byAlias.get(key) != null ? byAlias.get(key) : null);
+    };
+
     const outbound = new Map();
     const inbound = new Map();
     for (const n of list) {
       const targets = parseWikilinks(n && n.content).map((l) => l.target);
       outbound.set(n.id, targets);
       for (const t of targets) {
-        const tid = byTitle.get(titleKey(t));
+        const tid = resolveKey(titleKey(t));
         if (tid == null || tid === n.id) continue;
         if (!inbound.has(tid)) inbound.set(tid, new Set());
         inbound.get(tid).add(n.id);
       }
     }
-    return { byTitle, outbound, inbound };
+    return { byTitle, byAlias, outbound, inbound };
   }
 
   function resolveTitle(index, target) {
     if (!index) return null;
-    const id = index.byTitle.get(titleKey(target));
-    return id == null ? null : id;
+    const key = titleKey(target);
+    const id = index.byTitle.get(key);
+    if (id != null) return id;
+    const aid = index.byAlias && index.byAlias.get(key);
+    return aid != null ? aid : null;
+  }
+
+  // Full citation info — the target note's CURRENT title and kind, so a
+  // reader never sees the stale pre-rename name. kind is
+  // 'markdown' | 'timeline' | 'gallery'.
+  function resolveCitation(index, notes, target) {
+    const id = resolveTitle(index, target);
+    if (id == null) return null;
+    const note = (Array.isArray(notes) ? notes : []).find((x) => x && x.id === id);
+    if (!note) return null;
+    return { id, title: note.title, kind: note.kind || 'markdown' };
+  }
+
+  /**
+   * Picker candidates for a query: exact title, title starts-with, title
+   * contains, then alias contains; ties broken by updatedAt descending.
+   * An empty query returns the most recently updated notes. Each row is
+   * { id, title, kind, updatedAt, matchedBy: 'title' | 'alias' }.
+   */
+  function citeCandidates(index, notes, query, limit = 8) {
+    const list = (Array.isArray(notes) ? notes : []).filter((x) => x && titleKey(x.title) !== '');
+    const q = titleKey(query);
+    const scored = [];
+    for (const x of list) {
+      const t = titleKey(x.title);
+      let score = null;
+      let matchedBy = 'title';
+      if (!q) score = 4;
+      else if (t === q) score = 3;
+      else if (t.startsWith(q)) score = 2;
+      else if (t.includes(q)) score = 1;
+      else if (Array.isArray(x.aliases) && x.aliases.some((a) => titleKey(a).includes(q))) {
+        score = 0;
+        matchedBy = 'alias';
+      }
+      if (score != null) scored.push({ x, score, matchedBy });
+    }
+    scored.sort((a, b) => (b.score - a.score) || ((b.x.updatedAt || 0) - (a.x.updatedAt || 0)));
+    return scored.slice(0, limit).map(({ x, matchedBy }) => ({
+      id: x.id,
+      title: x.title,
+      kind: x.kind || 'markdown',
+      updatedAt: x.updatedAt || 0,
+      matchedBy,
+    }));
+  }
+
+  /**
+   * The citation text for a note — { text: '[[Title]]' } when the title can
+   * be cited, or { text: '', blocked: true, reason } when it is empty or
+   * contains '[', ']' or '|' (the citation syntax itself), because such a
+   * target could never resolve. Never mangles the title.
+   */
+  function citationFor(note) {
+    const title = note && typeof note.title === 'string' ? note.title.trim() : '';
+    if (!title || /[\[\]|]/.test(title)) {
+      return { text: '', blocked: true, reason: 'Title contains [ ] or |' };
+    }
+    return { text: '[[' + title + ']]' };
+  }
+
+  /**
+   * Render plain text (timeline items, gallery cards) with live citations:
+   * HTML-escape the WHOLE string first, then replace [[Target]] /
+   * [[Target|label]] with the same anchor markup the markdown renderer
+   * emits. Everything outside citations stays escaped — this is the only
+   * new place that builds link HTML, so it is tested against XSS payloads.
+   * An unterminated [[ is left as literal (escaped) text.
+   */
+  function citeify(text, resolve) {
+    const esc = String(text == null ? '' : text)
+      .replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    // escape AFTER escaping: the brackets themselves are not escaped, so
+    // the citation pattern can still be matched on the escaped string
+    return esc.replace(/\[\[([^\[\]|\n]+?)(?:\|([^\[\]\n]+?))?\]\]/g, (full, rawTarget, rawLabel) => {
+      const target = String(rawTarget).trim();
+      if (!target) return full;
+      const label = (rawLabel != null ? String(rawLabel).trim() : '') || target;
+      const id = typeof resolve === 'function' ? resolve(target) : null;
+      if (id) return '<a class="wikilink" href="#" data-wikilink="' + target + '">' + label + '</a>';
+      return '<a class="wikilink missing" href="#" data-wikilink="' + target + '" title="Create this note">' + label + '</a>';
+    });
   }
 
   // Notes linking to noteId, newest first, capped at 50. Each row carries a
@@ -104,7 +215,9 @@
       if (!n) continue;
       let target = null;
       for (const t of index.outbound.get(id) || []) {
-        if (index.byTitle.get(titleKey(t)) === noteId) { target = t; break; }
+        const tid = index.byTitle.get(titleKey(t));
+        const aid = index.byAlias && index.byAlias.get(titleKey(t));
+        if (tid === noteId || aid === noteId) { target = t; break; }
       }
       rows.push({ id, title: n.title, snippet: extractSnippet(n.content, target, 90), at: n.updatedAt || 0 });
     }
@@ -210,6 +323,7 @@
   }
 
   return {
+    resolveCitation, citeCandidates, citationFor, citeify,
     parseWikilinks, buildLinkIndex, titleKey, resolveTitle, inboundFor,
     extractSnippet, localDateKey, parseDateKey, addDays, isDateTitle, formatDayLabel,
   };

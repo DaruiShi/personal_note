@@ -310,7 +310,7 @@ fun SettingsScreen(vm: AppViewModel) {
 
         Spacer(Modifier.height(20.dp))
         Text(
-            "Funshare Notes 1.24 · self-hosted notes",
+            "Funshare Notes 1.28 · self-hosted notes",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.align(Alignment.CenterHorizontally),

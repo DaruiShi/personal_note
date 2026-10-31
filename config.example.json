@@ -1,12 +1,13 @@
 {
   "llm": {
     "enabled": true,
-    "baseUrl": "https://api.minimax.io/v1",
+    "baseUrl": "https://api.minimax.cn/v1",
     "model": "MiniMax-M3.1-Flash",
     "apiKey": "",
     "timeoutMs": 25000,
     "maxInputChars": 20000,
     "maxItemsPerRequest": 200,
-    "requestsPerHourPerUser": 30
+    "requestsPerHourPerUser": 30,
+    "suggestPerHourPerUser": 60
   }
 }

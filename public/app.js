@@ -300,10 +300,17 @@
         s = s.replace(/\[\[([^\[\]|\n]+?)(?:\|([^\[\]\n]+?))?\]\]/g, (full, rawTarget, rawLabel) => {
           const target = rawTarget.trim();
           if (!target) return full;
-          const label = (rawLabel != null ? rawLabel.trim() : '') || target;
+          const explicit = rawLabel != null && rawLabel.trim() !== '';
+          let label = explicit ? rawLabel.trim() : target;
           if (typeof opts.resolve === 'function') {
-            const id = opts.resolve(target);
-            if (id) return `<a class="wikilink" href="#" data-wikilink="${target}">${label}</a>`;
+            // The resolver returns { id, title } — the target's CURRENT
+            // title — so a citation written before a rename displays the
+            // renamed note's real name unless the author set a label.
+            const r = opts.resolve(target);
+            if (r && r.id) {
+              if (!explicit && r.title) label = r.title;
+              return `<a class="wikilink" href="#" data-wikilink="${target}">${label}</a>`;
+            }
             return `<a class="wikilink missing" href="#" data-wikilink="${target}" title="Create this note">${label}</a>`;
           }
           // No resolver (share page, history viewer): no link affordance.
@@ -477,9 +484,17 @@
     foldersCollapsed: localStorage.getItem('foldersCollapsed') === '1',
     publicBaseUrl: null, // server-configured origin for absolute share links
     featuresTimelineParse: false, // /api/session features.timelineParse
+    featuresGallerySuggest: false, // /api/session features.gallerySuggest
     tlIndex: 0,        // page index into the timeline's date set
     tlVisited: [],     // dates the user has stepped/jumped to (kept as pages)
     tlPending: [],     // parsed candidates awaiting confirmation in the modal
+    gDetailId: null,   // open gallery card ('new' = creating, null = grid)
+    gDraftTags: [],    // tags typed while creating (no card exists yet)
+    gBusy: false,      // an Add with AI suggestion is in flight
+    citeSel: 0,        // highlighted row in the autocomplete / picker
+    citeQuery: '',     // the current [[ query being typed
+    citeAnchor: null,  // { from } — the '[[' offset in the textarea
+    citeTimer: null,   // hover-preview delay handle
     previewFont: (() => {
       const v = parseFloat(localStorage.getItem('previewFontSize'));
       return v >= 12 && v <= 24 ? v : 15.5;
@@ -519,6 +534,15 @@
     tlParseNotice: $('tl-parse-notice'), tlParseResults: $('tl-parse-results'),
     tlParseRun: $('tl-parse-run'), tlParseConfirm: $('tl-parse-confirm'),
     tlParseClose: $('tl-parse-close'), segmented: document.querySelector('.editor-actions .segmented'),
+    newGalleryBtn: $('new-gallery-btn'), newGalleryIc: $('new-gallery-ic'),
+    gallery: $('gallery'), gNew: $('g-new'), gCount: $('g-count'), gHint: $('g-hint'), gGrid: $('g-grid'),
+    gDetail: $('g-detail'), gBack: $('g-back'), gTitle: $('g-title'), gDelete: $('g-delete'),
+    gContent: $('g-content'), gTags: $('g-tags'), gTagInput: $('g-tag-input'),
+    gColors: $('g-colors'), gMoveLeft: $('g-move-left'), gMoveRight: $('g-move-right'),
+    gAdd: $('g-add'), gLive: $('g-live'),
+    citeSuggest: $('cite-suggest'), citeModal: $('cite-modal'),
+    citeSearch: $('cite-search'), citeList: $('cite-list'), citeClose: $('cite-close'),
+    citePreview: $('cite-preview'), copyCiteBtn: $('copy-cite-btn'),
     shareCreate: $('share-create'), shareRevoke: $('share-revoke'), shareClose: $('share-close'),
     viewShare: $('view-share'), shareLogo: $('share-logo'), shareTitle: $('share-title'),
     shareMeta: $('share-meta'), shareContent: $('share-content'), shareError: $('share-error'),
@@ -707,21 +731,31 @@
      re-scan every note's content on each debounced autosave. */
   function updateLinkIndexFor(note) {
     const idx = state.linkIndex;
-    // forget this note's title claims (a rename frees the old key)
+    if (!idx.byAlias) idx.byAlias = new Map();
+    // forget this note's title AND alias claims (a rename frees old keys)
     for (const [k, id] of [...idx.byTitle]) {
       if (id === note.id) idx.byTitle.delete(k);
+    }
+    for (const [k, id] of [...idx.byAlias]) {
+      if (id === note.id) idx.byAlias.delete(k);
     }
     if (NotesLinks.titleKey(note.title) !== '') {
       // just-saved note is the newest holder of its title (set overwrites
       // a duplicate claim, keeping "newest updatedAt wins" deterministic)
       idx.byTitle.set(NotesLinks.titleKey(note.title), note.id);
     }
+    for (const a of note.aliases || []) {
+      const key = NotesLinks.titleKey(a);
+      if (!key || key === NotesLinks.titleKey(note.title) || idx.byTitle.has(key)) continue;
+      idx.byAlias.set(key, note.id);
+    }
     // recompute this note's outbound links and its inbound contributions
     for (const ids of idx.inbound.values()) ids.delete(note.id);
     const targets = NotesLinks.parseWikilinks(note.content).map((l) => l.target);
     idx.outbound.set(note.id, targets);
     for (const t of targets) {
-      const tid = idx.byTitle.get(NotesLinks.titleKey(t));
+      const key = NotesLinks.titleKey(t);
+      const tid = idx.byTitle.get(key) != null ? idx.byTitle.get(key) : idx.byAlias.get(key);
       if (tid == null || tid === note.id) continue;
       if (!idx.inbound.has(tid)) idx.inbound.set(tid, new Set());
       idx.inbound.get(tid).add(note.id);
@@ -1107,7 +1141,7 @@
     const row = el('div', 'note-item-title');
     const t = el('span', 't' + (note.title ? '' : ' untitled'), note.title || 'Untitled');
     row.append(t);
-    if (note.kind === 'timeline') row.append(el('span', 'kind-badge', 'timeline'));
+    if (isStructured(note)) row.append(el('span', 'kind-badge', note.kind));
     if (note.pinned) {
       const pin = el('span', 'pin');
       pin.innerHTML = pinSvg(13, true);
@@ -1190,8 +1224,9 @@
     updatePinBtn();
     updateShareBtn();
     updateWordCount();
-    // Timeline notes replace the write/preview editor with the date scroller.
-    if (note.kind === 'timeline') {
+    // Structured notes (timeline, gallery) replace the write/preview editor
+    // with their own view; markdown keeps the classic flow.
+    if (isStructured(note)) {
       applyEditorKind(note);
     } else {
       applyEditorKind(null);
@@ -1238,25 +1273,30 @@
   async function saveNote(note) {
     state.saving = true;
     setSaveStatus('saving');
-    const isTimeline = note.kind === 'timeline';
+    const struct = STRUCTURED[note.kind] || null; // structured kinds carry their own data
     try {
       const { note: updated } = await api(`/api/notes/${note.id}`, {
         method: 'PUT',
         body: {
           title: note.title, tags: note.tags,
           pinned: note.pinned, folderId: note.folderId || null, rev: note.rev,
-          // A timeline's content is the derived mirror — never client-supplied.
-          ...(isTimeline
-            ? { kind: 'timeline', timeline: { items: (note.timeline && note.timeline.items) || [] } }
+          // A structured note's content is the derived mirror — never
+          // client-supplied.
+          ...(struct
+            ? { kind: note.kind, [struct.field]: { items: note[struct.field] && note[struct.field].items || [] } }
             : { content: note.content }),
         },
       });
       note.updatedAt = updated.updatedAt;
       note.rev = updated.rev;
-      if (isTimeline) {
-        note.content = updated.content;       // the regenerated mirror
-        note.timeline = updated.timeline;     // normalised items (stable ids)
-        if (state.currentId === note.id) renderTimeline({ keepScroll: true });
+      // aliases are server-managed: adopt the echo so the local index and
+      // renderer see renames recorded by this save
+      if (Array.isArray(updated.aliases) && updated.aliases.length) note.aliases = updated.aliases;
+      else delete note.aliases;
+      if (struct) {
+        note.content = updated.content;                    // the regenerated mirror
+        note[struct.field] = updated[struct.field];        // normalised items (stable ids)
+        if (state.currentId === note.id) struct.render({ keepScroll: true });
       }
       updateLinkIndexFor(note);
       state.saving = false;
@@ -1347,12 +1387,11 @@
     note.folderId = serverNote.folderId != null ? serverNote.folderId : null;
     note.updatedAt = serverNote.updatedAt;
     note.rev = serverNote.rev;
-    if (serverNote.kind === 'timeline') {
-      note.kind = 'timeline';
-      note.timeline = serverNote.timeline || { items: [] };
-    } else {
-      delete note.kind;
-      delete note.timeline;
+    for (const kind of Object.keys(STRUCTURED)) delete note[STRUCTURED[kind].field];
+    delete note.kind;
+    if (STRUCTURED[serverNote.kind]) {
+      note.kind = serverNote.kind;
+      note[STRUCTURED[serverNote.kind].field] = serverNote[STRUCTURED[serverNote.kind].field] || { items: [] };
     }
     if (state.currentId === note.id) {
       ui.title.value = note.title;
@@ -1361,7 +1400,7 @@
       renderFolderOptions();
       updatePinBtn();
       updateWordCount();
-      if (note.kind === 'timeline') renderTimeline({ keepScroll: true });
+      if (STRUCTURED[note.kind]) STRUCTURED[note.kind].render({ keepScroll: true });
       else if (state.mode === 'preview') renderPreview();
     }
   }
@@ -1419,6 +1458,12 @@
   function updateWordCount() {
     const note = current();
     if (!note) { ui.wordCount.textContent = ''; return; }
+    if (note.kind === 'gallery') {
+      // word/char counts of the mirror are meaningless here
+      const n = (note.gallery && note.gallery.items.length) || 0;
+      ui.wordCount.textContent = `${n} card${n === 1 ? '' : 's'}`;
+      return;
+    }
     const words = note.content.trim() ? note.content.trim().split(/\s+/).length : 0;
     ui.wordCount.textContent = `${words.toLocaleString()} words · ${note.content.length.toLocaleString()} chars`;
   }
@@ -1543,6 +1588,7 @@
   /* ---------- markdown toolbar ---------- */
 
   const TB_ICONS = {
+    cite: (s) => svg(`<path d="M3 21c3 0 7-1 7-8V5c0-1.25-.756-2.017-2-2H4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2 1 0 1 0 1 1v1c0 1-1 2-2 2s-1 .008-1 1.031V20c0 1 0 1 1 1z"/><path d="M15 21c3 0 7-1 7-8V5c0-1.25-.757-2.017-2-2h-4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2h.75c0 2.25.25 4-2.75 4v3c0 1 0 1 1 1z"/>`, s),
     bold: (s) => svg(`<path d="M6 4h8a4 4 0 0 1 0 8H6z"/><path d="M6 12h9a4 4 0 0 1 0 8H6z"/>`, s),
     italic: (s) => svg(`<line x1="19" y1="4" x2="10" y2="4"/><line x1="14" y1="20" x2="5" y2="20"/><line x1="15" y1="4" x2="9" y2="20"/>`, s),
     heading: (s) => svg(`<path d="M6 4v16"/><path d="M18 4v16"/><path d="M6 12h12"/>`, s),
@@ -1760,8 +1806,254 @@
     { id: 'image', label: 'Insert image', run: () => ui.fileInput && ui.fileInput.click() },
     { id: 'attach', label: 'Attach file (PDF, Word, PPT…)', run: () => ui.docInput && ui.docInput.click() },
     { id: 'link', label: 'Link', run: insertLink },
+    { id: 'cite', label: 'Cite note', run: openCiteModal },
     { id: 'table', label: 'Table', run: insertTable },
   ];
+
+  /* ============================ citations (insertion UI) */
+
+  /** Insert '[[Title]]' over the active autocomplete range (or at the caret
+      when opened from the toolbar modal). Mirrors the toolbar's
+      setRangeText + applyEdit idiom so autosave fires. */
+  function insertCitation(title, from, to) {
+    const { selectionStart: s, selectionEnd: e, value } = ui.content;
+    const start = from != null ? from : s;
+    const end = to != null ? to : e;
+    ui.content.setRangeText('[[Title]]'.replace('Title', title), start, end);
+    const after = start + title.length + 4;
+    applyEdit(after, after);
+    hideCiteSuggest();
+  }
+
+  /** Is the caret's line inside an open code fence? (odd fence count above) */
+  function caretInFence() {
+    const upto = ui.content.value.slice(0, ui.content.selectionStart);
+    const lineStart = upto.lastIndexOf('\n') + 1;
+    const before = ui.content.value.slice(0, lineStart);
+    const fences = (before.match(/^```.*$/gm) || []).length;
+    return fences % 2 === 1;
+  }
+
+  /** Find an unterminated [[ before the caret (within 60 chars). */
+  function citeQueryAtCaret() {
+    const { selectionStart: s, value } = ui.content;
+    const back = value.slice(Math.max(0, s - 60), s);
+    const open = back.lastIndexOf('[[');
+    if (open < 0) return null;
+    const after = back.slice(open + 2);
+    if (after.includes(']]') || after.includes('\n')) return null;
+    return { from: Math.max(0, s - 60) + open, query: after };
+  }
+
+  function hideCiteSuggest() {
+    ui.citeSuggest.classList.add('hidden');
+    ui.citeSuggest.innerHTML = '';
+    state.citeAnchor = null;
+  }
+
+  function citeRowEl(c, sub) {
+    const row = el('button', 'cite-row' + (sub ? ' create' : ''));
+    row.type = 'button';
+    row.dataset.id = c.id || '';
+    row.dataset.title = c.title;
+    const main = el('div', 'cite-row-main');
+    main.append(el('span', 'cite-row-title', c.title));
+    if (c.kind && c.kind !== 'markdown') {
+      main.append(el('span', 'kind-badge', c.kind));
+    }
+    row.append(main);
+    if (sub) row.append(el('div', 'cite-row-sub', sub));
+    else if (c.matchedBy === 'alias') row.append(el('div', 'cite-row-sub', 'matched by alias'));
+    return row;
+  }
+
+  function updateCiteSuggest() {
+    if (state.mode !== 'write' || caretInFence()) { hideCiteSuggest(); return; }
+    const at = citeQueryAtCaret();
+    if (!at) { hideCiteSuggest(); return; }
+    state.citeAnchor = at;
+    const rows = NotesLinks.citeCandidates(state.linkIndex, state.notes, at.query);
+    state.citeSel = 0;
+    ui.citeSuggest.innerHTML = '';
+    if (!rows.length || rows[0].title.toLowerCase() !== at.query.trim().toLowerCase()) {
+      // "Create 'query'…" row: inserts the raw [[query]] (missing-link flow
+      // then offers creation on click)
+      const q = at.query.trim();
+      if (q) ui.citeSuggest.append(citeRowEl({ id: '', title: q }, `Create “${q}”…`));
+    }
+    for (const c of rows) ui.citeSuggest.append(citeRowEl(c));
+    const total = ui.citeSuggest.children.length;
+    if (!total) { hideCiteSuggest(); return; }
+    ui.citeSuggest.children[0].classList.add('sel');
+    ui.citeSuggest.classList.remove('hidden');
+  }
+
+  function citeSuggestMove(delta) {
+    const rows = [...ui.citeSuggest.children];
+    if (!rows.length) return;
+    rows[state.citeSel]?.classList.remove('sel');
+    state.citeSel = (state.citeSel + delta + rows.length) % rows.length;
+    const row = rows[state.citeSel];
+    row.classList.add('sel');
+    row.scrollIntoView({ block: 'nearest' });
+  }
+
+  function citeSuggestCommit() {
+    const row = ui.citeSuggest.children[state.citeSel];
+    if (!row || !state.citeAnchor) return;
+    insertCitation(row.dataset.title, state.citeAnchor.from, ui.content.selectionStart);
+  }
+
+  ui.citeSuggest.addEventListener('mousedown', (e) => {
+    const row = e.target.closest('.cite-row');
+    if (!row) return;
+    e.preventDefault(); // keep the textarea's selection
+    insertCitation(row.dataset.title, state.citeAnchor ? state.citeAnchor.from : ui.content.selectionStart, ui.content.selectionStart);
+  });
+
+  ui.content.addEventListener('input', () => {
+    if (state.mode === 'write') updateCiteSuggest();
+  });
+
+  ui.content.addEventListener('keydown', (e) => {
+    if (ui.citeSuggest.classList.contains('hidden')) return;
+    if (e.key === 'ArrowDown') { e.preventDefault(); citeSuggestMove(1); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); citeSuggestMove(-1); }
+    else if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); citeSuggestCommit(); }
+    else if (e.key === 'Escape') { hideCiteSuggest(); }
+  });
+
+  /* ---------- toolbar citation picker ---------- */
+
+  function openCiteModal() {
+    if (state.mode !== 'write') return;
+    ui.citeSearch.value = '';
+    renderCiteList('');
+    ui.citeModal.classList.remove('hidden');
+    ui.citeSearch.focus();
+  }
+
+  function renderCiteList(query) {
+    const rows = NotesLinks.citeCandidates(state.linkIndex, state.notes, query);
+    state.citeSel = 0;
+    ui.citeList.innerHTML = '';
+    if (!rows.length) {
+      ui.citeList.append(el('div', 'list-empty', 'No matching notes.'));
+      return;
+    }
+    rows.forEach((c, i) => {
+      const row = citeRowEl(c, c.matchedBy === 'alias' ? 'matched by alias' : null);
+      row.dataset.idx = String(i);
+      if (i === 0) row.classList.add('sel');
+      row.addEventListener('click', () => {
+        ui.citeModal.classList.add('hidden');
+        insertCitation(c.title);
+      });
+      ui.citeList.append(row);
+    });
+  }
+
+  ui.citeSearch.addEventListener('input', () => renderCiteList(ui.citeSearch.value));
+  ui.citeSearch.addEventListener('keydown', (e) => {
+    const rows = [...ui.citeList.querySelectorAll('.cite-row')];
+    if (e.key === 'ArrowDown' && rows.length) {
+      e.preventDefault();
+      rows[state.citeSel]?.classList.remove('sel');
+      state.citeSel = Math.min(state.citeSel + 1, rows.length - 1);
+      rows[state.citeSel].classList.add('sel');
+      rows[state.citeSel].scrollIntoView({ block: 'nearest' });
+    } else if (e.key === 'ArrowUp' && rows.length) {
+      e.preventDefault();
+      rows[state.citeSel]?.classList.remove('sel');
+      state.citeSel = Math.max(state.citeSel - 1, 0);
+      rows[state.citeSel].classList.add('sel');
+    } else if (e.key === 'Enter' && rows.length) {
+      e.preventDefault();
+      rows[state.citeSel].click();
+    } else if (e.key === 'Escape') {
+      ui.citeModal.classList.add('hidden');
+    }
+  });
+  ui.citeClose.addEventListener('click', () => ui.citeModal.classList.add('hidden'));
+  ui.citeModal.addEventListener('click', (e) => {
+    if (e.target === ui.citeModal) ui.citeModal.classList.add('hidden');
+  });
+
+  /* ---------- copy citation ---------- */
+
+  if (ui.copyCiteBtn) {
+    ui.copyCiteBtn.addEventListener('click', () => {
+      const note = current();
+      if (!note) return;
+      const r = NotesLinks.citationFor(note);
+      if (r.blocked) { toast(r.reason); return; }
+      navigator.clipboard.writeText(r.text).then(
+        () => toast('Citation copied'),
+        () => toast('Could not access the clipboard'),
+      );
+    });
+  }
+
+  /* ---------- hover / focus preview ---------- */
+
+  let citePreviewTimer = null;
+  function showCitePreview(anchor) {
+    const target = anchor.dataset.wikilink || '';
+    const cite = NotesLinks.resolveCitation(state.linkIndex, state.notes, target);
+    ui.citePreview.innerHTML = '';
+    if (!cite) {
+      ui.citePreview.append(el('div', 'cite-pv-title', `No note titled “${target}” yet — click to create it.`));
+    } else {
+      const note = state.notes.find((x) => x.id === cite.id);
+      ui.citePreview.append(el('div', 'cite-pv-title', cite.title));
+      const meta = el('div', 'cite-pv-meta');
+      if (cite.kind !== 'markdown') meta.append(el('span', 'kind-badge', cite.kind));
+      meta.append(el('span', '', fmtRel(note ? note.updatedAt : Date.now())));
+      ui.citePreview.append(meta);
+      const body = note ? NotesLinks.extractSnippet(note.content || '', '', 140) : '';
+      if (body) ui.citePreview.append(el('div', 'cite-pv-snippet', body));
+    }
+    // position near the anchor, clamped to the viewport
+    const r = anchor.getBoundingClientRect();
+    ui.citePreview.classList.remove('hidden');
+    const pw = ui.citePreview.offsetWidth;
+    const ph = ui.citePreview.offsetHeight;
+    const left = Math.max(8, Math.min(r.left, window.innerWidth - pw - 8));
+    const top = r.bottom + 8 + ph > window.innerHeight ? Math.max(8, r.top - ph - 8) : r.bottom + 8;
+    ui.citePreview.style.left = left + 'px';
+    ui.citePreview.style.top = top + 'px';
+    anchor.setAttribute('aria-describedby', 'cite-preview');
+  }
+
+  function hideCitePreview() {
+    clearTimeout(citePreviewTimer);
+    citePreviewTimer = null;
+    ui.citePreview.classList.add('hidden');
+    ui.citePreview.innerHTML = '';
+    document.querySelectorAll('a.wikilink[aria-describedby]').forEach((a) => a.removeAttribute('aria-describedby'));
+  }
+
+  for (const container of [ui.preview, ui.tlScroller, ui.gGrid]) {
+    if (!container) continue;
+    container.addEventListener('mouseover', (e) => {
+      const anchor = e.target.closest('a.wikilink[data-wikilink]');
+      if (!anchor) return;
+      clearTimeout(citePreviewTimer);
+      citePreviewTimer = setTimeout(() => showCitePreview(anchor), 250);
+    });
+    container.addEventListener('mouseout', (e) => {
+      if (e.target.closest('a.wikilink')) hideCitePreview();
+    });
+    container.addEventListener('focusin', (e) => {
+      const anchor = e.target.closest('a.wikilink[data-wikilink]');
+      if (anchor) showCitePreview(anchor);
+    });
+    container.addEventListener('focusout', hideCitePreview);
+  }
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !ui.citePreview.classList.contains('hidden')) hideCitePreview();
+  });
+  window.addEventListener('scroll', hideCitePreview, { passive: true });
 
   function initToolbar() {
     ui.toolbar.innerHTML = '';
@@ -1870,7 +2162,7 @@
   function renderPreview() {
     const note = current();
     ui.preview.innerHTML = note
-      ? MD.render(note.content, { resolve: (t) => NotesLinks.resolveTitle(state.linkIndex, t) })
+      ? MD.render(note.content, { resolve: (t) => NotesLinks.resolveCitation(state.linkIndex, state.notes, t) })
       : '';
     renderOnThisDay(note);
     renderBacklinks(note);
@@ -2068,6 +2360,34 @@
 
   /* ================================ timeline notes */
 
+  /**
+   * Structured note kinds: their data lives in a field named after the
+   * kind and note.content is a server-derived mirror. Every kind check in
+   * the editor routes through this table (badge, save body, render,
+   * entering the editor) so adding a kind never grows an || chain.
+   */
+  const STRUCTURED = {
+    timeline: {
+      field: 'timeline',
+      render: renderTimeline,
+      enter: () => {
+        state.tlVisited = [];
+        const dates = tlDates();
+        state.tlIndex = Math.max(0, dates.indexOf(tlToday()));
+        renderTimeline({ instant: true });
+      },
+    },
+    gallery: {
+      field: 'gallery',
+      render: renderGallery,
+      enter: () => {
+        state.gDetailId = null;
+        renderGallery();
+      },
+    },
+  };
+  const isStructured = (n) => n && STRUCTURED[n.kind] != null;
+
   const tlItems = (note) => {
     const n = note || current();
     return (n && n.timeline && n.timeline.items) || [];
@@ -2080,18 +2400,16 @@
 
   // Show/hide the editor chrome per note kind. `note` null = markdown.
   function applyEditorKind(note) {
-    const isTimeline = note && note.kind === 'timeline';
-    ui.timeline.classList.toggle('hidden', !isTimeline);
-    if (ui.segmented) ui.segmented.classList.toggle('hidden', !!isTimeline);
-    if (isTimeline) {
+    const struct = note && STRUCTURED[note.kind];
+    ui.timeline.classList.toggle('hidden', !(note && note.kind === 'timeline'));
+    ui.gallery.classList.toggle('hidden', !(note && note.kind === 'gallery'));
+    if (ui.segmented) ui.segmented.classList.toggle('hidden', !!struct);
+    if (struct) {
       ui.content.classList.add('hidden');
       ui.preview.classList.add('hidden');
       ui.fontCtl.classList.add('hidden');
       ui.toolbar.classList.add('hidden');
-      state.tlVisited = [];
-      const dates = tlDates();
-      state.tlIndex = Math.max(0, dates.indexOf(tlToday()));
-      renderTimeline({ instant: true });
+      struct.enter(note);
     }
   }
 
@@ -2249,7 +2567,9 @@
     cb.setAttribute('aria-label', 'Mark done');
     cb.title = item.done ? 'Mark as not done' : 'Mark as done';
     const body = el('div', 'tl-item-body');
-    body.append(el('div', 'tl-item-text', item.text));
+    const itemText = el('div', 'tl-item-text');
+    itemText.innerHTML = NotesLinks.citeify(item.text, (t) => NotesLinks.resolveCitation(state.linkIndex, state.notes, t));
+    body.append(itemText);
     const metaBits = [tlTimeLabel(item), fmtRel(item.updatedAt || item.createdAt)].filter(Boolean);
     body.append(el('div', 'tl-item-time', metaBits.join(' · ')));
     const actions = el('div', 'tl-item-actions');
@@ -2360,6 +2680,13 @@
 
   // One delegated listener for item actions and per-page add fields.
   ui.tlScroller.addEventListener('click', (e) => {
+    // citations inside timeline items navigate like preview citations
+    const tlLink = e.target.closest('a.wikilink');
+    if (tlLink) {
+      e.preventDefault();
+      openWikilink(tlLink.dataset.wikilink || '');
+      return;
+    }
     const act = e.target.closest('.tl-act');
     if (act) {
       const article = act.closest('.tl-item');
@@ -2625,6 +2952,370 @@
       toast(`Added ${selected.length} item${selected.length === 1 ? '' : 's'}`);
     }
     ui.tlParseModal.classList.add('hidden');
+  });
+
+  /* ================================ gallery notes */
+
+  const gItems = (note) => ((note || current()).gallery && (note || current()).gallery.items) || [];
+
+  function gAnnounce(msg) {
+    if (ui.gLive) ui.gLive.textContent = msg;
+  }
+
+  function renderGallery() {
+    const note = current();
+    if (!note || note.kind !== 'gallery') return;
+    const items = gItems(note);
+    const sum = NotesGallery.summary(items);
+    ui.gCount.textContent = sum.total
+      ? `${sum.total} card${sum.total === 1 ? '' : 's'} · ${sum.colors} colour${sum.colors === 1 ? '' : 's'}`
+      : '';
+    if (state.gDetailId) renderGalleryDetail();
+    else renderGalleryGrid(items);
+  }
+
+  function renderGalleryGrid(items) {
+    ui.gDetail.classList.add('hidden');
+    ui.gGrid.classList.remove('hidden');
+    ui.gHint.classList.remove('hidden');
+    ui.gGrid.innerHTML = '';
+    if (!items.length) {
+      const empty = el('div', 'g-empty', 'No cards yet — press “New card” to add one.');
+      ui.gGrid.append(empty);
+      return;
+    }
+    for (const c of items) ui.gGrid.append(gCardEl(c, items));
+  }
+
+  function gCardEl(c, items) {
+    const card = el('button', 'g-card');
+    card.type = 'button';
+    card.dataset.id = c.id;
+    card.dataset.color = c.color;
+    card.setAttribute('role', 'listitem');
+    card.setAttribute('aria-label', `${c.title || 'Untitled card'}`);
+    card.append(el('div', 'g-card-title', c.title || 'Untitled card'));
+    card.append(el('div', 'g-card-preview', NotesGallery.previewText(c.content)));
+    if (c.tags.length) {
+      const tags = el('div', 'g-card-tags');
+      for (const t of c.tags.slice(0, 3)) tags.append(el('span', 'g-chip', t));
+      if (c.tags.length > 3) tags.append(el('span', 'g-chip more', `+${c.tags.length - 3}`));
+      card.append(tags);
+    }
+    // a grip enables HTML5 drag (same pattern as folder reordering)
+    const grip = el('span', 'g-grip');
+    grip.innerHTML = ICONS.grip(14);
+    grip.title = 'Drag to reorder';
+    grip.setAttribute('aria-hidden', 'true');
+    grip.addEventListener('mousedown', () => { card.draggable = true; });
+    grip.addEventListener('mouseup', () => { card.draggable = false; });
+    card.append(grip);
+    card.addEventListener('click', () => {
+      state.gDetailId = c.id;
+      renderGallery();
+    });
+    card.addEventListener('keydown', (e) => {
+      // Alt+Arrow moves the focused card (touch/keyboard reordering)
+      if (!e.altKey) return;
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        e.preventDefault();
+        gMoveCard(c.id, e.key === 'ArrowLeft' ? -1 : 1);
+      }
+    });
+    return card;
+  }
+
+  function gFind(id) {
+    return gItems().find((c) => c.id === id) || null;
+  }
+
+  /** Mutate one card through a transform of the items array, re-render, save. */
+  function gMutate(fn) {
+    const note = current();
+    if (!note || note.kind !== 'gallery') return;
+    note.gallery = { items: fn(gItems(note)) };
+    renderGallery();
+    scheduleSave();
+    updateWordCount();
+  }
+
+  function gMoveCard(id, delta) {
+    const note = current();
+    if (!note || note.kind !== 'gallery') return;
+    const items = gItems(note);
+    const card = gFind(id);
+    if (!card) return;
+    const moved = NotesGallery.moveBy(items, id, delta);
+    const idx = moved.findIndex((c) => c.id === id);
+    note.gallery = { items: moved };
+    renderGallery();
+    scheduleSave();
+    gAnnounce(`Moved “${card.title || 'Untitled card'}” to position ${idx + 1} of ${moved.length}`);
+  }
+
+  function renderGalleryDetail() {
+    const creating = state.gDetailId === 'new';
+    const card = creating ? null : gFind(state.gDetailId);
+    if (!creating && !card) {
+      state.gDetailId = null;
+      renderGalleryGrid(gItems());
+      return;
+    }
+    ui.gGrid.classList.add('hidden');
+    ui.gHint.classList.add('hidden');
+    ui.gDetail.classList.remove('hidden');
+    ui.gTitle.value = card ? card.title : '';
+    ui.gContent.value = card ? card.content : '';
+    ui.gAdd.textContent = creating ? 'Add' : 'Done';
+    renderGalleryTags(card ? card.tags : state.gDraftTags);
+    renderGalleryColors(card ? card.color : NotesGallery.PALETTE[Math.floor(Math.random() * 12)]);
+    if (creating) ui.gContent.focus();
+  }
+
+  function renderGalleryTags(tags) {
+    ui.gTags.innerHTML = '';
+    for (const t of tags) {
+      const chip = el('span', 'g-chip');
+      chip.append(document.createTextNode(t));
+      const x = el('button', 'g-chip-x');
+      x.type = 'button';
+      x.setAttribute('aria-label', `Remove tag ${t}`);
+      x.textContent = '×';
+      x.addEventListener('click', () => {
+        if (state.gDetailId === 'new') {
+          state.gDraftTags = state.gDraftTags.filter((v) => v !== t);
+          renderGalleryTags(state.gDraftTags);
+          return;
+        }
+        const card = gFind(state.gDetailId);
+        if (card) gMutate((items) => NotesGallery.updateCard(items, card.id, { tags: card.tags.filter((v) => v !== t) }));
+      });
+      chip.append(x);
+      ui.gTags.append(chip);
+    }
+  }
+
+  function renderGalleryColors(active) {
+    ui.gColors.innerHTML = '';
+    for (const key of NotesGallery.PALETTE) {
+      const sw = el('button', 'g-swatch');
+      sw.type = 'button';
+      sw.dataset.color = key;
+      sw.setAttribute('aria-label', `Colour: ${key}`);
+      sw.setAttribute('aria-pressed', String(key === active));
+      sw.classList.toggle('active', key === active);
+      sw.title = key;
+      sw.addEventListener('click', () => {
+        const card = gFind(state.gDetailId);
+        renderGalleryColors(key);
+        if (card) gMutate((items) => NotesGallery.updateCard(items, card.id, { color: key }));
+        else ui.gColors.dataset.pending = key;
+      });
+      ui.gColors.append(sw);
+    }
+  }
+
+  // live edits in the detail view mutate the card and autosave
+  for (const [elem, field, parse] of [[ui.gTitle, 'title', (v) => v], [ui.gContent, 'content', (v) => v]]) {
+    elem.addEventListener('input', () => {
+      const card = gFind(state.gDetailId);
+      if (!card) return;
+      gMutate((items) => NotesGallery.updateCard(items, card.id, { [field]: parse(elem.value) }));
+    });
+  }
+
+  ui.gTagInput.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ',') return;
+    e.preventDefault();
+    const raw = ui.gTagInput.value;
+    if (!raw.trim()) { ui.gTagInput.value = ''; return; }
+    if (state.gDetailId === 'new') {
+      state.gDraftTags = NotesGallery.normalizeTags([...state.gDraftTags, ...raw.split(/[,，]/)]);
+      renderGalleryTags(state.gDraftTags);
+      ui.gTagInput.value = '';
+      return;
+    }
+    const card = gFind(state.gDetailId);
+    if (!card) { ui.gTagInput.value = ''; return; }
+    const merged = NotesGallery.normalizeTags([...card.tags, ...raw.split(/[,，]/)]);
+    gMutate((items) => NotesGallery.updateCard(items, card.id, { tags: merged }));
+    ui.gTagInput.value = '';
+  });
+
+  ui.gBack.addEventListener('click', gCloseDetail);
+  function gCloseDetail() {
+    state.gDetailId = null;
+    renderGallery();
+  }
+
+  ui.gDelete.addEventListener('click', async () => {
+    const card = gFind(state.gDetailId);
+    if (!card) return;
+    const ok = await confirmModal({
+      title: 'Delete this card?',
+      text: `“${card.title || 'Untitled card'}” will be removed from the gallery.`,
+      confirmText: 'Delete',
+    });
+    if (!ok) return;
+    gMutate((items) => NotesGallery.removeCard(items, card.id));
+    state.gDetailId = null;
+    renderGallery();
+  });
+
+  ui.gMoveLeft.addEventListener('click', () => state.gDetailId && gMoveCard(state.gDetailId, -1));
+  ui.gMoveRight.addEventListener('click', () => state.gDetailId && gMoveCard(state.gDetailId, 1));
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || !state.gDetailId || state.gDetailId === 'new') return;
+    if (!ui.gallery || ui.gallery.classList.contains('hidden')) return;
+    gCloseDetail();
+  });
+
+  ui.gNew.addEventListener('click', () => {
+    state.gDetailId = 'new';
+    state.gDraftTags = [];
+    renderGallery();
+  });
+
+  /** Add: validate, optionally ask the LLM for a title/tags, never block. */
+  ui.gAdd.addEventListener('click', async () => {
+    const note = current();
+    if (!note || note.kind !== 'gallery' || state.gBusy) return;
+    const content = ui.gContent.value.trim();
+    if (!content) {
+      toast('Card content is empty');
+      return;
+    }
+    const creating = state.gDetailId === 'new';
+    if (!creating) { // "Done": just close back to the grid
+      gCloseDetail();
+      return;
+    }
+    let title = ui.gTitle.value.trim();
+    let tags = state.gDetailId === 'new'
+      ? [...state.gDraftTags]
+      : NotesGallery.normalizeTags([...(gFind(state.gDetailId) || { tags: [] }).tags]);
+    const wantTitle = !title;
+    const wantTags = tags.length === 0;
+    if ((wantTitle || wantTags) && state.featuresGallerySuggest) {
+      state.gBusy = true;
+      ui.gAdd.disabled = true;
+      ui.gAdd.textContent = 'Adding…';
+      try {
+        const data = await api('/api/gallery/suggest', {
+          method: 'POST',
+          body: { content, need: { title: wantTitle, tags: wantTags }, maxTags: 5 },
+        });
+        if (wantTitle && data.title) title = data.title;
+        if (wantTags && Array.isArray(data.tags)) tags = data.tags;
+      } catch (err) {
+        if (err.status === 429) toast('Too many AI requests this hour — try again later');
+        else toast('Saved without an AI title');
+      } finally {
+        state.gBusy = false;
+        ui.gAdd.disabled = false;
+      }
+    }
+    if (!title) title = NotesGallery.fallbackTitle(content);
+    const pendingColor = ui.gColors.dataset.pending || NotesGallery.PALETTE[Math.floor(Math.random() * 12)];
+    const card = NotesGallery.newCard({ title, content, tags, color: pendingColor });
+    delete ui.gColors.dataset.pending;
+    state.gDraftTags = [];
+    gMutate((items) => [...items, card]);
+    state.gDetailId = null;
+    renderGallery();
+    // scroll the new card into view and flash it
+    const elNew = ui.gGrid.querySelector(`[data-id="${card.id}"]`);
+    if (elNew) {
+      elNew.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      elNew.classList.add('flash');
+      setTimeout(() => elNew.classList.remove('flash'), 1200);
+    }
+    gAnnounce(`Added “${title}”`);
+  });
+
+  async function newGalleryNote() {
+    await flushSave();
+    await pruneIfEmpty(state.currentId);
+    try {
+      const { note } = await api('/api/notes', {
+        method: 'POST',
+        body: { title: 'Gallery', kind: 'gallery', gallery: { items: [] }, tags: [], folderId: state.folderFilter || null },
+      });
+      state.notes.unshift(note);
+      updateCount();
+      state.query = '';
+      ui.search.value = '';
+      setTagFilter(null);
+      await selectNote(note.id);
+    } catch (err) {
+      toast(`Could not create gallery: ${err.message}`);
+    }
+  }
+
+  ui.newGalleryBtn.addEventListener('click', newGalleryNote);
+
+  /* Grid drag-and-drop: nearest card centre decides the drop; leading half
+     inserts before, trailing half after (a wrapping grid has no single
+     axis, unlike the folder list). */
+  let gDragId = null;
+  ui.gGrid.addEventListener('dragstart', (e) => {
+    const card = e.target.closest('.g-card');
+    if (!card) return;
+    gDragId = card.dataset.id;
+    card.classList.add('dragging');
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = 'move';
+      try { e.dataTransfer.setData('text/plain', gDragId); } catch { /* IE quirk */ }
+    }
+  });
+  ui.gGrid.addEventListener('dragend', () => {
+    gDragId = null;
+    ui.gGrid.querySelectorAll('.g-card.dragging, .g-card.drop-above, .g-card.drop-below').forEach((c) =>
+      c.classList.remove('dragging', 'drop-above', 'drop-below'));
+  });
+  ui.gGrid.addEventListener('dragover', (e) => {
+    if (!gDragId) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    const cards = [...ui.gGrid.querySelectorAll('.g-card')].filter((c) => c.dataset.id !== gDragId);
+    ui.gGrid.querySelectorAll('.g-card.drop-above, .g-card.drop-below').forEach((c) =>
+      c.classList.remove('drop-above', 'drop-below'));
+    let best = null;
+    let bestDist = Infinity;
+    for (const c of cards) {
+      const r = c.getBoundingClientRect();
+      const d = Math.hypot(e.clientX - (r.left + r.width / 2), e.clientY - (r.top + r.height / 2));
+      if (d < bestDist) { bestDist = d; best = c; }
+    }
+    if (best) {
+      const r = best.getBoundingClientRect();
+      const before = e.clientX < r.left + r.width / 2;
+      best.classList.add(before ? 'drop-above' : 'drop-below');
+      best.dataset.dropSide = before ? 'above' : 'below';
+    }
+  });
+  ui.gGrid.addEventListener('drop', (e) => {
+    if (!gDragId) return;
+    e.preventDefault();
+    const note = current();
+    if (!note || note.kind !== 'gallery') return;
+    const items = gItems(note);
+    const marked = ui.gGrid.querySelector('.g-card.drop-above, .g-card.drop-below');
+    let toIndex = items.length - 1;
+    if (marked) {
+      const targetIdx = items.findIndex((c) => c.id === marked.dataset.id);
+      if (targetIdx >= 0) toIndex = marked.dataset.dropSide === 'above' ? targetIdx : targetIdx + 1;
+      // moving within the same array: remove-first semantics need +0/-1 care
+      const fromIdx = items.findIndex((c) => c.id === gDragId);
+      if (fromIdx >= 0 && fromIdx < toIndex) toIndex -= 1;
+    }
+    note.gallery = { items: NotesGallery.reorder(items, gDragId, toIndex) };
+    renderGallery();
+    scheduleSave();
+    const card = gFind(gDragId);
+    gAnnounce(`Moved “${(card && card.title) || 'card'}” to position ${toIndex + 1} of ${note.gallery.items.length}`);
+    gDragId = null;
   });
 
   /* Interactive task checkboxes: clicking one flips the matching
@@ -3311,6 +4002,7 @@
     ui.newTimelineIc.innerHTML = ICONS.calendar();
     ui.tlPrev.innerHTML = ICONS.chevronLeft();
     ui.tlNext.innerHTML = ICONS.chevronRight();
+    ui.newGalleryIc.innerHTML = ICONS.folder(15);
     ui.logoutBtn.innerHTML = ICONS.logout();
     ui.menuBtn.innerHTML = ICONS.menu(20);
     ui.delBtn.innerHTML = ICONS.trash();
@@ -3344,6 +4036,7 @@
       if (Number.isFinite(s.trashRetentionDays)) state.trashRetentionDays = s.trashRetentionDays;
       state.publicBaseUrl = typeof s.publicBaseUrl === 'string' ? s.publicBaseUrl : null;
       state.featuresTimelineParse = !!(s.features && s.features.timelineParse);
+      state.featuresGallerySuggest = !!(s.features && s.features.gallerySuggest);
       if (s.needsSetup) showAuth('setup');
       else if (s.authenticated) {
         state.user = s.user;

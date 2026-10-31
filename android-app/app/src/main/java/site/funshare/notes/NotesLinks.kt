@@ -30,9 +30,29 @@ object NotesLinks {
 
     data class LinkIndex(
         val byTitle: Map<String, String> = emptyMap(),
+        /** Rename aliases (server-managed previous titles); a real title
+         *  always beats an alias, and collisions pick the newest note. */
+        val byAlias: Map<String, String> = emptyMap(),
         val outbound: Map<String, List<String>> = emptyMap(),
         val inbound: Map<String, Set<String>> = emptyMap(),
     )
+
+    /** Full citation info: the target's CURRENT title and kind, so a reader
+     *  never sees the stale pre-rename name. kind: markdown|timeline|gallery. */
+    data class Citation(val id: String, val title: String, val kind: String)
+
+    /** A picker row for the citation dialog. */
+    data class Candidate(
+        val id: String,
+        val title: String,
+        val kind: String,
+        val updatedAt: Long,
+        val matchedBy: String, // "title" | "alias"
+    )
+
+    /** The insertable citation for a note — or a blocked reason when the
+     *  title contains '[', ']' or '|' (the citation syntax itself). */
+    data class CitationText(val text: String, val blocked: Boolean = false, val reason: String? = null)
 
     /* ------------------------------------------------------- title matching */
 
@@ -82,19 +102,37 @@ object NotesLinks {
         notes.filter { titleKey(it.title).isNotEmpty() }
             .sortedBy { it.updatedAt }
             .forEach { byTitle[titleKey(it.title)] = it.id }
+        // aliases: real titles win; a note never aliases its own title
+        val byAlias = mutableMapOf<String, String>()
+        notes.filter { !it.aliases.isNullOrEmpty() }
+            .sortedBy { it.updatedAt }
+            .forEach { n ->
+                for (a in n.aliases!!) {
+                    val key = titleKey(a)
+                    if (key.isEmpty() || key == titleKey(n.title)) continue
+                    if (byTitle.containsKey(key)) continue
+                    byAlias[key] = n.id
+                }
+            }
         val outbound = mutableMapOf<String, List<String>>()
         val inbound = mutableMapOf<String, MutableSet<String>>()
         for (n in notes) {
             val targets = parseWikilinks(n.content).map { it.target }
             outbound[n.id] = targets
             for (t in targets) {
-                val tid = byTitle[titleKey(t)] ?: continue
+                val tid = resolveKey(byTitle, byAlias, titleKey(t)) ?: continue
                 if (tid == n.id) continue
                 inbound.getOrPut(tid) { mutableSetOf() }.add(n.id)
             }
         }
-        return LinkIndex(byTitle, outbound, inbound)
+        return LinkIndex(byTitle, byAlias, outbound, inbound as Map<String, Set<String>>)
     }
+
+    private fun resolveKey(
+        byTitle: Map<String, String>,
+        byAlias: Map<String, String>,
+        key: String,
+    ): String? = byTitle[key] ?: byAlias[key]
 
     /**
      * Incremental index update for one saved note (used on autosave so a
@@ -105,21 +143,74 @@ object NotesLinks {
         byTitle.entries.removeAll { it.value == note.id }
         val key = titleKey(note.title)
         if (key.isNotEmpty()) byTitle[key] = note.id // just-saved = newest holder
+        val byAlias = index.byAlias.toMutableMap()
+        byAlias.entries.removeAll { it.value == note.id }
+        for (a in note.aliases.orEmpty()) {
+            val ak = titleKey(a)
+            if (ak.isEmpty() || ak == key || byTitle.containsKey(ak)) continue
+            byAlias[ak] = note.id
+        }
         val inbound = index.inbound.mapValues { it.value.toMutableSet() }.toMutableMap()
         inbound.values.forEach { it.remove(note.id) }
         val outbound = index.outbound.toMutableMap()
         val targets = parseWikilinks(note.content).map { it.target }
         outbound[note.id] = targets
         for (t in targets) {
-            val tid = byTitle[titleKey(t)] ?: continue
+            val tid = resolveKey(byTitle, byAlias, titleKey(t)) ?: continue
             if (tid == note.id) continue
             inbound.getOrPut(tid) { mutableSetOf() }.add(note.id)
         }
-        return LinkIndex(byTitle, outbound, inbound)
+        return LinkIndex(byTitle, byAlias, outbound, inbound as Map<String, Set<String>>)
     }
 
     fun resolveTitle(index: LinkIndex, target: String): String? =
-        index.byTitle[titleKey(target)]
+        resolveKey(index.byTitle, index.byAlias, titleKey(target))
+
+    /** Citation info with the target's CURRENT title and kind, or null. */
+    fun resolveCitation(index: LinkIndex, notes: List<Note>, target: String): Citation? {
+        val id = resolveTitle(index, target) ?: return null
+        val note = notes.firstOrNull { it.id == id } ?: return null
+        return Citation(id, note.title, note.kind ?: "markdown")
+    }
+
+    /**
+     * Picker candidates: exact title, title starts-with, title contains,
+     * then alias contains; ties by updatedAt descending. Empty query =
+     * most recently updated.
+     */
+    fun citeCandidates(index: LinkIndex, notes: List<Note>, query: String, limit: Int = 8): List<Candidate> {
+        val q = titleKey(query)
+        data class Scored(val note: Note, val score: Int, val matchedBy: String)
+        val scored = mutableListOf<Scored>()
+        for (x in notes.filter { titleKey(it.title).isNotEmpty() }) {
+            val t = titleKey(x.title)
+            var score: Int? = null
+            var matchedBy = "title"
+            when {
+                q.isEmpty() -> score = 4
+                t == q -> score = 3
+                t.startsWith(q) -> score = 2
+                t.contains(q) -> score = 1
+                x.aliases.orEmpty().any { titleKey(it).contains(q) } -> { score = 0; matchedBy = "alias" }
+            }
+            if (score != null) scored.add(Scored(x, score, matchedBy))
+        }
+        scored.sortWith(compareByDescending<Scored> { it.score }.thenByDescending { it.note.updatedAt })
+        return scored.take(limit).map {
+            Candidate(it.note.id, it.note.title, it.note.kind ?: "markdown", it.note.updatedAt, it.matchedBy)
+        }
+    }
+
+    /** The insertable '[[Title]]' — blocked (with reason) when the title is
+     *  empty or contains the citation syntax characters. Never mangles. */
+    fun citationFor(note: Note?): CitationText {
+        val title = note?.title?.trim().orEmpty()
+        if (title.isEmpty()) return CitationText("", blocked = true, reason = "This note has no title yet")
+        if (title.any { it == '[' || it == ']' || it == '|' }) {
+            return CitationText("", blocked = true, reason = "Title contains [ ] or |")
+        }
+        return CitationText("[[$title]]")
+    }
 
     /** Notes linking to [noteId], newest first, capped at 50. */
     fun inboundFor(index: LinkIndex, noteId: String, notes: List<Note>): List<Backlink> {
@@ -132,7 +223,9 @@ object NotesLinks {
             val n = byId[id] ?: continue
             var target: String? = null
             for (t in index.outbound[id] ?: emptyList()) {
-                if (index.byTitle[titleKey(t)] == noteId) { target = t; break }
+                val tid = index.byTitle[titleKey(t)]
+                val aid = index.byAlias[titleKey(t)]
+                if (tid == noteId || aid == noteId) { target = t; break }
             }
             rows.add(Row(n, extractSnippet(n.content, target, 90)))
         }
@@ -213,7 +306,16 @@ object NotesLinks {
      * code is masked with same-length spaces so match indices line up with
      * the original line; fenced blocks are skipped whole.
      */
-    fun toMarkdownLinks(content: String?, resolve: (String) -> String?): String {
+    /**
+     * @param resolve returns the note id for a citable target, or null.
+     * @param resolveDisplay returns the CURRENT title to display for an
+     * UNLABELLED citation (rename healing); null keeps the typed target.
+     */
+    fun toMarkdownLinks(
+        content: String?,
+        resolve: (String) -> String?,
+        resolveDisplay: ((String) -> String?)? = null,
+    ): String {
         val src = (content ?: "").replace("\r\n", "\n").replace("\r", "\n")
         val out = StringBuilder()
         var inFence = false
@@ -229,13 +331,16 @@ object NotesLinks {
                 if (m == null) { out.append(line, i, line.length); break }
                 out.append(line, i, m.range.first) // original text before the link
                 val target = m.groupValues[1].trim()
+                val explicit = m.groupValues[2].trim().isNotEmpty()
                 val label = m.groupValues[2].trim().ifEmpty { target }
                 if (target.isEmpty()) {
                     out.append(line, m.range.first, m.range.last + 1)
                 } else {
                     val scheme = if (resolve(target) != null) WIKILINK_SCHEME else WIKILINK_MISSING_SCHEME
+                    // unlabelled citations display the target's current title
+                    val shown = if (!explicit) resolveDisplay?.invoke(target) ?: label else label
                     val enc = URLEncoder.encode(target, "UTF-8")
-                    out.append("[").append(escapeMdLabel(label)).append("](").append(scheme).append(enc).append(")")
+                    out.append("[").append(escapeMdLabel(shown)).append("](").append(scheme).append(enc).append(")")
                 }
                 i = m.range.last + 1
             }
@@ -249,6 +354,55 @@ object NotesLinks {
         .replace("[", "\\[")
         .replace("]", "\\]")
 
+    /** One segment of citeified plain text: either literal text or a
+     *  citation carrying the note id it resolves to (null when missing or
+     *  unresolvable). */
+    data class CitePart(val text: String, val citationId: String?, val target: String)
+
+    /**
+     * Split plain text (timeline items, gallery cards) into literal text
+     * and citation segments — the Compose counterpart of the web's
+     * citeify(). Fenced/inline code is skipped, mirroring the renderer.
+     * Unlabelled citations carry the target's CURRENT title as text when
+     * resolvable, so renames heal here too.
+     */
+    fun citeifiedParts(
+        text: String?,
+        resolve: (String) -> String?,
+        resolveDisplay: ((String) -> String?)? = null,
+    ): List<CitePart> {
+        val src = (text ?: "").replace("\r\n", "\n").replace("\r", "\n")
+        val out = mutableListOf<CitePart>()
+        val plain = StringBuilder()
+        var inFence = false
+        for (line in src.split("\n")) {
+            if (FENCE_RE.matches(line)) { inFence = !inFence; plain.append(line).append(' '); continue }
+            if (inFence) { plain.append(line).append(' '); continue }
+            val masked = line.replace(Regex("`[^`\n]*`")) { " ".repeat(it.value.length) }
+            var i = 0
+            var consumed = 0
+            while (i < line.length) {
+                val m = WIKILINK_RE.find(masked, i) ?: break
+                val target = m.groupValues[1].trim()
+                if (target.isEmpty()) { i = m.range.last + 1; continue }
+                if (m.range.first > consumed) plain.append(line, consumed, m.range.first)
+                if (plain.isNotEmpty()) { out.add(CitePart(plain.toString(), null, "")); plain.clear() }
+                val explicit = m.groupValues[2].trim().isNotEmpty()
+                val label = m.groupValues[2].trim().ifEmpty { target }
+                val id = resolve(target)
+                val shown = if (!explicit && id != null) resolveDisplay?.invoke(target) ?: label else label
+                out.add(CitePart(shown, id, target))
+                consumed = m.range.last + 1
+                i = m.range.last + 1
+            }
+            if (consumed < line.length) plain.append(line, consumed, line.length)
+            plain.append(' ')
+        }
+        var pending = plain.toString()
+        if (pending.isNotEmpty() && pending.endsWith(" ")) pending = pending.dropLast(1)
+        if (pending.isNotEmpty()) out.add(CitePart(pending, null, ""))
+        return out
+    }
     /** True when [link] is a wikilink URL produced by [toMarkdownLinks]. */
     fun isWikilinkUrl(link: String): Boolean =
         link.startsWith(WIKILINK_SCHEME) || link.startsWith(WIKILINK_MISSING_SCHEME)

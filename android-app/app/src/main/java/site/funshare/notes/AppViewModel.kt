@@ -104,6 +104,11 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
         internal set
     var editIsTimeline by mutableStateOf(false)
         internal set
+    /** Gallery cards being edited (only when editIsGallery). */
+    var editGallery by mutableStateOf<List<GalleryCard>>(emptyList())
+        internal set
+    var editIsGallery by mutableStateOf(false)
+        internal set
     var editStatus by mutableStateOf<EditStatus>(EditStatus.Idle)
         private set
     /** Non-null while a save hit a 409 and the user must pick a version. */
@@ -132,6 +137,10 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
 
     /** Server has an LLM config for timeline Paste & parse. */
     var timelineParseEnabled by mutableStateOf(false)
+        private set
+
+    /** Server has an LLM config for gallery title/tag suggestions. */
+    var gallerySuggestEnabled by mutableStateOf(false)
         private set
 
     /* wikilink index over the live notes (rebuilt on list changes,
@@ -538,10 +547,10 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
         val pending = notes.filter { it.isLocal }
         for (n in pending) {
             try {
-                val created = if (n.isTimeline) {
-                    api.createTimelineNote(n.title, n.timeline ?: emptyList(), n.tags, n.pinned, n.folderId)
-                } else {
-                    api.createNote(n.title, n.content, n.tags, n.pinned, n.folderId)
+                val created = when {
+                    n.isTimeline -> api.createTimelineNote(n.title, n.timeline ?: emptyList(), n.tags, n.pinned, n.folderId)
+                    n.isGallery -> api.createGalleryNote(n.title, n.gallery ?: emptyList(), n.tags, n.pinned, n.folderId)
+                    else -> api.createNote(n.title, n.content, n.tags, n.pinned, n.folderId)
                 }
                 notes = notes.map { if (it.id == n.id) created else it }
                 if (editingId == n.id) {
@@ -608,7 +617,7 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
         val note = if (id == "new") null else notes.firstOrNull { it.id == id }
         editingId = id
         conflict = null
-        editStartInPreview = note != null && !startInEdit && !note.isTimeline
+        editStartInPreview = note != null && !startInEdit && !note.isTimeline && !note.isGallery
         pendingDraftFolderId = null
         editTitle = note?.title ?: ""
         editContent = note?.content ?: ""
@@ -616,6 +625,8 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
         editPinned = note?.pinned ?: false
         editIsTimeline = note?.isTimeline == true
         editTimeline = note?.timeline ?: emptyList()
+        editIsGallery = note?.isGallery == true
+        editGallery = note?.gallery ?: emptyList()
         lastSavedSnapshot = editorSnapshot()
         editStatus = if (note == null) EditStatus.Idle else EditStatus.Saved(note.updatedAt)
         navigate(Screen.Edit)
@@ -676,6 +687,70 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
             } catch (e: Exception) {
                 postMessage("Couldn't create timeline — ${Api.describeError(e)}")
             }
+        }
+    }
+
+
+    /* ----------------------------------------------- gallery notes */
+
+    /** Create an empty gallery note and open it in the gallery editor. */
+    fun newGalleryNote() {
+        viewModelScope.launch {
+            autosaveNow()
+            try {
+                val created = api.createGalleryNote(
+                    "Gallery", emptyList(), emptyList(), false,
+                    folderId = selectedFolderId?.takeIf { it.isNotEmpty() },
+                )
+                notes = sortNotes(listOf(created) + notes)
+                updateLinkIndex(created)
+                store.cachedNotes = notes
+                openEditor(created.id)
+            } catch (e: Exception) {
+                postMessage("Couldn't create gallery — ${Api.describeError(e)}")
+            }
+        }
+    }
+
+    private fun gMutate(transform: (List<GalleryCard>) -> List<GalleryCard>) {
+        if (!editIsGallery) return
+        editGallery = transform(editGallery)
+        onEditorChanged()
+    }
+
+    fun gAdd(card: GalleryCard) = gMutate { it + card }
+
+    fun gUpdate(id: String, patch: Map<String, Any?>) =
+        gMutate { NotesGallery.updateCard(it, id, patch) }
+
+    fun gDelete(id: String) = gMutate { NotesGallery.removeCard(it, id) }
+
+    /** Move buttons: reorder within the grid. */
+    fun gMove(id: String, delta: Int) = gMutate { NotesGallery.moveBy(it, id, delta) }
+
+    /**
+     * Suggest a title and/or tags for one card's content. Uses the server's
+     * LLM when configured and falls back to the local title heuristic —
+     * card creation is never blocked on failure. Returns (title, tags,
+     * notice); empty title means "use fallbackTitle".
+     */
+    suspend fun suggestForCard(
+        content: String,
+        needTitle: Boolean,
+        needTags: Boolean,
+    ): Triple<String?, List<String>?, String?> {
+        if (!gallerySuggestEnabled) return Triple(null, null, null)
+        return try {
+            val (title, tags) = api.suggestGallery(content, needTitle, needTags)
+            Triple(title, tags, null)
+        } catch (e: ApiException) {
+            if (e.code == "too_many_requests" || e.code == "busy") {
+                Triple(null, null, e.message ?: "Too many AI requests this hour — try again later")
+            } else {
+                Triple(null, null, null) // silent fallback to the local title
+            }
+        } catch (e: Exception) {
+            Triple(null, null, null)
         }
     }
 
@@ -751,6 +826,13 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
     fun okHttpClient() = api.httpClient()
 
     /* --------------------------------------- wikilinks + daily notes */
+
+    /** Insert raw text at the editor's caret (or append when the caret is
+     *  unknown) and mark the note dirty, like any other edit. */
+    fun insertAtCursor(text: String) {
+        editContent = editContent + text
+        onEditorChanged()
+    }
 
     /** Resolve a wikilink target to a note id, or null when nothing matches. */
     fun resolveWikilink(target: String): String? =
@@ -838,6 +920,7 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
     private fun applySessionFeatures(s: SessionInfo) {
         shareQrEnabled = s.featuresQr
         timelineParseEnabled = s.featuresTimelineParse
+        gallerySuggestEnabled = s.featuresGallerySuggest
     }
 
     private fun saveEditor(id: String) {
@@ -846,7 +929,35 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
             editStatus = EditStatus.Saving
             val snap = editorSnapshot()
             try {
-                if (editIsTimeline) {
+                if (editIsGallery) {
+                    if (id == "new" || id.startsWith("local:")) {
+                        val draft = notes.firstOrNull { it.id == id }
+                        val created = api.createGalleryNote(
+                            editTitle, editGallery, editTags, editPinned,
+                            folderId = pendingDraftFolderId ?: draft?.folderId,
+                        )
+                        editingId = created.id
+                        pendingDraftFolderId = null
+                        if (backStack.lastOrNull() == Screen.Edit) replaceTop(Screen.Edit)
+                        notes = sortNotes(notes.filterNot { it.id == id } + created)
+                        rebuildLinkIndex() // the old draft id left the list
+                    } else {
+                        val current = notes.firstOrNull { it.id == id }
+                        val updated = api.updateGalleryNote(
+                            id, editTitle, editGallery, editTags, editPinned,
+                            folderId = pendingDraftFolderId ?: current?.folderId,
+                            rev = current?.rev?.takeIf { it > 0 },
+                        )
+                        pendingDraftFolderId = null
+                        notes = sortNotes(notes.map { if (it.id == id) updated else it })
+                        updateLinkIndex(updated) // incremental: no full rescan per save
+                    }
+                    // The server normalises ids/colours; adopt its cards and
+                    // recompute the dirty snapshot so the editor settles.
+                    val saved = notes.firstOrNull { it.id == editingId }
+                    editGallery = saved?.gallery ?: editGallery
+                    lastSavedSnapshot = editorSnapshot()
+                } else if (editIsTimeline) {
                     if (id == "new" || id.startsWith("local:")) {
                         val draft = notes.firstOrNull { it.id == id }
                         val created = api.createTimelineNote(
@@ -897,10 +1008,11 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
                     notes = sortNotes(notes.map { if (it.id == id) updated else it })
                     updateLinkIndex(updated) // incremental: no full rescan per save
                 }
-                // The timeline branch already recomputed its snapshot after
-                // adopting the server-normalised items (ids may change), so
-                // only the markdown paths take the pre-save snap here.
-                if (!editIsTimeline) lastSavedSnapshot = snap
+                // The structured branches already recomputed their
+                // snapshots after adopting the server-normalised items
+                // (ids may change), so only the markdown path takes the
+                // pre-save snap here.
+                if (!editIsTimeline && !editIsGallery) lastSavedSnapshot = snap
                 editStatus = EditStatus.Saved(System.currentTimeMillis())
                 store.cachedNotes = notes
                 store.pendingNotes = notes.filter { it.isLocal }
@@ -933,8 +1045,13 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
         val draft = Note(
             id = id, title = editTitle, content = editContent,
             tags = editTags, pinned = editPinned, createdAt = now, updatedAt = now,
-            kind = if (editIsTimeline) "timeline" else null,
+            kind = when {
+                editIsTimeline -> "timeline"
+                editIsGallery -> "gallery"
+                else -> null
+            },
             timeline = if (editIsTimeline) editTimeline else null,
+            gallery = if (editIsGallery) editGallery else null,
         )
         editingId = id
         if (originalId == "new" && backStack.lastOrNull() == Screen.Edit) replaceTop(Screen.Edit)
@@ -971,6 +1088,8 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
             editPinned = server.pinned
             editIsTimeline = server.isTimeline
             editTimeline = server.timeline ?: emptyList()
+            editIsGallery = server.isGallery
+            editGallery = server.gallery ?: emptyList()
             lastSavedSnapshot = editorSnapshot()
             editStatus = EditStatus.Saved(server.updatedAt)
         }
@@ -987,7 +1106,13 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
         viewModelScope.launch {
             editStatus = EditStatus.Saving
             try {
-                val updated = if (editIsTimeline) {
+                val updated = if (editIsGallery) {
+                    api.updateGalleryNote(
+                        c.noteId, editTitle, editGallery, editTags, editPinned,
+                        folderId = pendingDraftFolderId ?: c.server.folderId,
+                        rev = c.server.rev,
+                    )
+                } else if (editIsTimeline) {
                     api.updateTimelineNote(
                         c.noteId, editTitle, editTimeline, editTags, editPinned,
                         folderId = pendingDraftFolderId ?: c.server.folderId,
@@ -1004,6 +1129,7 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
                 notes = sortNotes(notes.map { if (it.id == c.noteId) updated else it })
                 updateLinkIndex(updated)
                 if (editIsTimeline) editTimeline = updated.timeline ?: editTimeline
+                if (editIsGallery) editGallery = updated.gallery ?: editGallery
                 lastSavedSnapshot = editorSnapshot()
                 editStatus = EditStatus.Saved(System.currentTimeMillis())
                 store.cachedNotes = notes

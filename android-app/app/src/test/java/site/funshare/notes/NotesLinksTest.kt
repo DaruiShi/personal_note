@@ -158,7 +158,7 @@ class NotesLinksTest {
     @Test
     fun toMarkdownLinksEncodesTargetsAndMarksMissing() {
         val idx = NotesLinks.buildLinkIndex(listOf(note("t", "Target Note")))
-        val md = NotesLinks.toMarkdownLinks("See [[Target Note|hint]] and [[Nope]].") { NotesLinks.resolveTitle(idx, it) }
+        val md = NotesLinks.toMarkdownLinks("See [[Target Note|hint]] and [[Nope]].", resolve = { NotesLinks.resolveTitle(idx, it) })
         assertEquals("See [hint](wikilink:Target+Note) and [Nope](wikilinkx:Nope).", md)
         // round-trip: the scheme URLs decode back to the targets
         assertEquals("Target Note", NotesLinks.wikilinkTarget("wikilink:Target+Note"))
@@ -170,7 +170,7 @@ class NotesLinksTest {
 
     @Test
     fun toMarkdownLinksLeavesCodeAlone() {
-        val md = NotesLinks.toMarkdownLinks("a `[[X]]` b\n```\n[[Y]]\n```") { null }
+        val md = NotesLinks.toMarkdownLinks("a `[[X]]` b\n```\n[[Y]]\n```", resolve = { null })
         assertTrue(md.contains("`[[X]]`"))
         assertTrue(md.contains("[[Y]]"))
         assertFalse(md.contains("wikilink"))
