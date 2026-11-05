@@ -56,6 +56,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.TextDecoration
@@ -212,6 +213,8 @@ private fun TimelineDatePage(
     // long-press drag reorder state: which item is in the air and how far
     var dragId by remember { mutableStateOf<String?>(null) }
     var dragOffset by remember { mutableFloatStateOf(0f) }
+    // a progress-bar gesture under the finger must never lift a row
+    var barPressed by remember { mutableStateOf(false) }
 
     fun dropDrag() {
         val id = dragId ?: return
@@ -277,17 +280,30 @@ private fun TimelineDatePage(
                         .graphicsLayer { translationY = if (dragging) dragOffset else 0f }
                         .pointerInput(item.id) {
                             detectDragGesturesAfterLongPress(
-                                onDragStart = { dragId = item.id; dragOffset = 0f },
+                                // a bar press owns the gesture: never lift the row for it
+                                onDragStart = {
+                                    if (!barPressed) {
+                                        dragId = item.id
+                                        dragOffset = 0f
+                                    }
+                                },
                                 onDrag = { change, amount ->
-                                    change.consume()
-                                    dragOffset += amount.y
+                                    if (dragId != null) {
+                                        change.consume()
+                                        dragOffset += amount.y
+                                    }
                                 },
                                 onDragEnd = { dropDrag() },
                                 onDragCancel = { dragId = null; dragOffset = 0f },
                             )
                         },
                 ) {
-                    TimelineItemRow(vm, item, onEdit = { onEditItem(item) })
+                    TimelineItemRow(
+                        vm,
+                        item,
+                        onEdit = { onEditItem(item) },
+                        onBarActive = { barPressed = it },
+                    )
                 }
             }
 
@@ -434,7 +450,12 @@ private fun TimePresetRow(start: String, end: String, onPick: (String?, String?)
 /* --------------------------------------------------------------- one item */
 
 @Composable
-private fun TimelineItemRow(vm: AppViewModel, item: TimelineItem, onEdit: () -> Unit) {
+private fun TimelineItemRow(
+    vm: AppViewModel,
+    item: TimelineItem,
+    onEdit: () -> Unit,
+    onBarActive: (Boolean) -> Unit,
+) {
     var menuOpen by remember { mutableStateOf(false) }
     var moveOpen by remember { mutableStateOf(false) }
 
@@ -471,14 +492,26 @@ private fun TimelineItemRow(vm: AppViewModel, item: TimelineItem, onEdit: () -> 
                 }
                 Spacer(Modifier.size(8.dp))
             }
-            CiteText(
-                text = item.text,
-                done = item.done,
-                vm = vm,
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(vertical = 6.dp),
-            )
+            Column(Modifier.weight(1f)) {
+                CiteText(
+                    text = item.text,
+                    done = item.done,
+                    vm = vm,
+                    modifier = Modifier.padding(vertical = 6.dp),
+                )
+                // the item's progress bar (web .tl-progress), dimmed when done
+                if (item.progress != null) {
+                    ProgressBarRow(
+                        progress = item.progress,
+                        onChange = { vm.tlSetProgress(item.id, it) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 6.dp),
+                        dimmed = item.done,
+                        onDragActive = onBarActive,
+                    )
+                }
+            }
             Box {
                 IconButton(onClick = { menuOpen = true }) {
                     Icon(
@@ -556,15 +589,17 @@ private fun TimelineItemPage(
     var text by remember(itemId, date) { mutableStateOf(existing?.text ?: "") }
     var start by remember(itemId, date) { mutableStateOf(existing?.start ?: "") }
     var end by remember(itemId, date) { mutableStateOf(existing?.end ?: "") }
+    var progressText by remember(itemId, date) { mutableStateOf(existing?.progress?.toString() ?: "") }
 
     androidx.activity.compose.BackHandler(onBack = onClose)
 
     fun save() {
         if (text.isBlank()) return
+        val progress = parseProgressInput(progressText)
         if (existing != null) {
-            vm.tlUpdateItem(existing.id, text, start.ifBlank { null }, end.ifBlank { null })
+            vm.tlUpdateItem(existing.id, text, start.ifBlank { null }, end.ifBlank { null }, progress)
         } else {
-            vm.tlAdd(date, text, start.ifBlank { null }, end.ifBlank { null })
+            vm.tlAdd(date, text, start.ifBlank { null }, end.ifBlank { null }, progress)
         }
         onClose()
     }
@@ -656,6 +691,51 @@ private fun TimelineItemPage(
             ) {
                 TimePresetRow(start, end) { s, e -> start = s.orEmpty(); end = e.orEmpty() }
             }
+
+            /* progress */
+            Spacer(Modifier.size(16.dp))
+            Text(
+                "Progress",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.size(8.dp))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                ProgressBarTrack(
+                    progress = parseProgressInput(progressText) ?: 0,
+                    onChange = { progressText = it.toString() },
+                    modifier = Modifier.weight(1f),
+                    height = 8.dp,
+                    bordered = true,
+                    label = "Progress bar",
+                )
+                OutlinedTextField(
+                    value = progressText,
+                    onValueChange = { progressText = it.filter(Char::isDigit).take(3) },
+                    placeholder = {
+                        Text("—", style = MaterialTheme.typography.labelMedium)
+                    },
+                    modifier = Modifier.width(88.dp),
+                    singleLine = true,
+                    shape = AppShapes.field,
+                    textStyle = MaterialTheme.typography.labelMedium,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                )
+                Text(
+                    "%",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Spacer(Modifier.size(6.dp))
+            Text(
+                "Drag the bar or type a percentage — empty means no progress bar.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             Spacer(Modifier.weight(1f))
             Spacer(Modifier.height(16.dp))
         }

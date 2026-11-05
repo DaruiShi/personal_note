@@ -163,6 +163,17 @@
               <textarea id="g-content" class="g-content-input" placeholder="Card content&hellip;" rows="8"></textarea>
               <div class="g-tags" id="g-tags"></div>
               <input id="g-tag-input" class="g-tag-input" placeholder="Add a tag and press Enter" autocomplete="off">
+              <div class="g-progress-row" id="g-progress-row">
+                <span class="g-progress-label">Progress</span>
+                <div class="g-progress-edit" id="g-progress-edit">
+                  <div class="g-progress-track" id="g-progress-track" tabindex="0" role="slider"
+                    aria-label="Card progress" aria-valuemin="0" aria-valuemax="100"><div class="g-progress-fill" id="g-progress-fill"></div></div>
+                  <input type="number" id="g-progress-input" class="g-progress-input" min="0" max="100" step="1"
+                    placeholder="&mdash;" aria-label="Progress percentage">
+                  <span class="g-progress-unit">%</span>
+                  <button class="icon-btn" id="g-progress-clear" type="button" title="Clear progress" aria-label="Clear progress"></button>
+                </div>
+              </div>
               <div class="g-colors" id="g-colors" role="group" aria-label="Card colour"></div>
               <div class="g-detail-actions">
                 <button class="btn" id="g-move-left" type="button">Move earlier</button>

@@ -481,3 +481,53 @@ test('lib/timeline unit: isDateKey, normalizeTimeline, mirror determinism', () =
   assert.ok(bad.ok);
   assert.notEqual(bad.items[0].id, 'not-a-uuid'); // non-UUID ids are regenerated
 });
+
+test('progress: validated on write, mirrored as (NN%), survives edits', async () => {
+  const server = await startServer();
+  try {
+    const cookie = await register(server.base, 'tlprog');
+    const { data: { note } } = await req(server.base, cookie, 'POST', '/api/notes', {
+      title: 'tl', kind: 'timeline',
+      timeline: { items: [
+        { date: '2026-10-30', text: 'halfway', progress: 40 },
+        { date: '2026-10-30', text: 'bad value drops', progress: 140 },
+        { date: '2026-10-30', text: 'no progress' },
+      ] },
+      tags: [], pinned: false,
+    });
+    const items = note.timeline.items;
+    assert.equal(items[0].progress, 40);
+    assert.equal(items[1].progress, null); // out of range -> not tracked
+    assert.equal(items[2].progress, null);
+    assert.equal(note.content,
+      '## 2026-10-30\n- [ ] halfway (40%)\n- [ ] bad value drops\n- [ ] no progress');
+    // an edit keeps a changed progress and drops the suffix when cleared
+    const put = await req(server.base, cookie, 'PUT', `/api/notes/${note.id}`, {
+      title: 'tl', kind: 'timeline', rev: note.rev,
+      timeline: { items: [
+        { ...items[0], progress: 100, done: true },
+        { ...items[1], progress: null },
+        items[2],
+      ] },
+      tags: [], pinned: false,
+    });
+    assert.equal(put.status, 200);
+    assert.equal(put.data.note.timeline.items[0].progress, 100);
+    assert.equal(put.data.note.content,
+      '## 2026-10-30\n- [x] halfway (100%)\n- [ ] bad value drops\n- [ ] no progress');
+  } finally {
+    await server.stop();
+  }
+});
+
+test('lib/timeline unit: clampProgress accepts whole 0-100 only', () => {
+  assert.equal(tl.clampProgress(0), 0);
+  assert.equal(tl.clampProgress(100), 100);
+  assert.equal(tl.clampProgress(40), 40);
+  assert.equal(tl.clampProgress(-1), null);
+  assert.equal(tl.clampProgress(101), null);
+  assert.equal(tl.clampProgress(40.5), null);
+  assert.equal(tl.clampProgress('40'), null);
+  assert.equal(tl.clampProgress(null), null);
+  assert.equal(tl.clampProgress(undefined), null);
+});

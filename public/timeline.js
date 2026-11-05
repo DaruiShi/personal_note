@@ -151,15 +151,45 @@
       start: start || null,
       end: end || null,
       done: false,
+      progress: null,
       createdAt: now,
       updatedAt: now,
     };
   }
 
-  /** Flip one item's done flag (bumping updatedAt); returns a new array. */
+  /** Optional 0-100 whole percent, else null — same rule as the server. */
+  function clampProgress(v) {
+    return (Number.isInteger(v) && v >= 0 && v <= 100) ? v : null;
+  }
+
+  /**
+   * Flip one item's done flag (bumping updatedAt); returns a new array.
+   * Done and progress stay a single state: checking done fills a tracked
+   * progress to 100, unchecking drops a full bar (the item is reopened).
+   */
   function toggleDone(items, id) {
-    return (items || []).map((it) =>
-      it.id === id ? { ...it, done: !it.done, updatedAt: Date.now() } : it);
+    return (items || []).map((it) => {
+      if (it.id !== id) return it;
+      const done = !it.done;
+      let progress = it.progress != null ? it.progress : null;
+      if (done && progress != null) progress = 100;
+      if (!done && progress === 100) progress = null;
+      return { ...it, done, progress, updatedAt: Date.now() };
+    });
+  }
+
+  /**
+   * Set one item's progress (null or 0-100; clamped). 100% marks the item
+   * done; any value below 100 reopens it. Clearing (null) leaves done as it
+   * is. Returns a new array.
+   */
+  function setProgress(items, id, progress) {
+    const p = clampProgress(progress);
+    return (items || []).map((it) => {
+      if (it.id !== id) return it;
+      const done = p === 100 ? true : (p != null ? false : it.done);
+      return { ...it, progress: p, done, updatedAt: Date.now() };
+    });
   }
 
   /**
@@ -326,7 +356,7 @@
   return {
     sortItems, groupByDate, pageDates, visiblePages, TIME_PRESETS,
     makeItem, insertItem, updateItemText, updateItemTime, moveItem, moveWithinDate,
-    removeItem, toggleDone, mergeParsed,
+    removeItem, toggleDone, setProgress, clampProgress, mergeParsed,
     parseFallback, summarize,
   };
 });

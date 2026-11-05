@@ -728,6 +728,10 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
     /** Move buttons: reorder within the grid. */
     fun gMove(id: String, delta: Int) = gMutate { NotesGallery.moveBy(it, id, delta) }
 
+    /** Drag or exact entry on a card's progress bar (null removes the bar). */
+    fun gSetProgress(id: String, progress: Int?) =
+        gMutate { NotesGallery.setProgress(it, id, progress) }
+
     /**
      * Suggest a title and/or tags for one card's content. Uses the server's
      * LLM when configured and falls back to the local title heuristic —
@@ -760,23 +764,34 @@ class AppViewModel(app: NotesApp) : AndroidViewModel(app) {
         onEditorChanged()
     }
 
-    fun tlAdd(date: String, text: String, start: String? = null, end: String? = null) =
-        tlMutate { NotesTimeline.insertItem(it, NotesTimeline.makeItem(date, text, start = start, end = end)) }
+    fun tlAdd(date: String, text: String, start: String? = null, end: String? = null, progress: Int? = null) =
+        tlMutate { NotesTimeline.insertItem(it, NotesTimeline.makeItem(date, text, start = start, end = end, progress = progress)) }
 
     fun tlUpdateText(id: String, text: String) =
         tlMutate { NotesTimeline.updateText(it, id, text) }
 
-    /** Edit dialog: text plus times; re-slots only when the times changed. */
-    fun tlUpdateItem(id: String, text: String, start: String?, end: String?) {
+    /**
+     * Item page: text, times and progress; re-slots only when the times
+     * changed. A changed progress applies the done coupling (100% marks
+     * the item done, below reopens it) exactly like the web client.
+     */
+    fun tlUpdateItem(id: String, text: String, start: String?, end: String?, progress: Int? = null) {
         val item = editTimeline.firstOrNull { it.id == id } ?: return
         tlMutate { items ->
             var next = NotesTimeline.updateText(items, id, text)
             if (item.start != start || item.end != end) {
                 next = NotesTimeline.updateItemTime(next, id, start, end)
             }
+            if (progress != item.progress) {
+                next = NotesTimeline.setProgress(next, id, progress)
+            }
             next
         }
     }
+
+    /** Drag or exact entry on an item's progress bar (null removes the bar). */
+    fun tlSetProgress(id: String, progress: Int?) =
+        tlMutate { NotesTimeline.setProgress(it, id, progress) }
 
     fun tlToggleDone(id: String) =
         tlMutate { NotesTimeline.toggleDone(it, id) }

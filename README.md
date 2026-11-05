@@ -311,7 +311,7 @@ test/                     node:test suite (npm test)
 ## Android app
 
 A native Android client lives in [`android-app/`](android-app/README.md) —
-the signed APK is `android-app/FunshareNotes-v1.28.apk`. It connects to this
+the signed APK is `android-app/FunshareNotes-v1.29.apk`. It connects to this
 server's JSON API with the same accounts and notes as the website, and its
 server address is configurable on the sign-in screen.
 

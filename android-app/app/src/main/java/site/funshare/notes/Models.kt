@@ -17,6 +17,8 @@ data class TimelineItem(
     val start: String? = null,
     val end: String? = null,
     val order: Int? = null,
+    /** Optional 0-100 whole-percent progress on the item; null = no bar. */
+    val progress: Int? = null,
     val createdAt: Long = 0,
     val updatedAt: Long = 0,
 ) {
@@ -37,6 +39,7 @@ data class TimelineItem(
             start = o.optString("start").ifEmpty { null },
             end = o.optString("end").ifEmpty { null },
             order = if (o.isNull("order")) null else o.optInt("order", -1).takeIf { it >= 0 },
+            progress = o.optInt("progress", -1).takeIf { it in 0..100 },
             createdAt = o.optLong("createdAt"),
             updatedAt = o.optLong("updatedAt"),
         )
@@ -55,6 +58,7 @@ data class TimelineItem(
                         .put("start", it.start ?: JSONObject.NULL)
                         .put("end", it.end ?: JSONObject.NULL)
                         .put("order", it.order ?: JSONObject.NULL)
+                        .put("progress", it.progress ?: JSONObject.NULL)
                         .put("createdAt", it.createdAt).put("updatedAt", it.updatedAt),
                 )
             }
@@ -74,6 +78,8 @@ data class GalleryCard(
     val content: String,
     val tags: List<String> = emptyList(),
     val color: String = "slate",
+    /** Optional 0-100 whole-percent progress on the card; null = no bar. */
+    val progress: Int? = null,
     val createdAt: Long = 0,
     val updatedAt: Long = 0,
 ) {
@@ -87,6 +93,7 @@ data class GalleryCard(
                 List(a.length()) { a.optString(it) }.filter { it.isNotEmpty() }
             },
             color = o.optString("color").ifEmpty { "slate" },
+            progress = o.optInt("progress", -1).takeIf { it in 0..100 },
             createdAt = o.optLong("createdAt"),
             updatedAt = o.optLong("updatedAt"),
         )
@@ -103,6 +110,7 @@ data class GalleryCard(
                     JSONObject().put("id", it.id).put("title", it.title).put("content", it.content)
                         .put("tags", JSONArray(it.tags))
                         .put("color", it.color)
+                        .put("progress", it.progress ?: JSONObject.NULL)
                         .put("createdAt", it.createdAt).put("updatedAt", it.updatedAt),
                 )
             }

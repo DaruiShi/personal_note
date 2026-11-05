@@ -490,6 +490,7 @@
     tlPending: [],     // parsed candidates awaiting confirmation in the modal
     gDetailId: null,   // open gallery card ('new' = creating, null = grid)
     gDraftTags: [],    // tags typed while creating (no card exists yet)
+    gDraftProgress: null, // progress chosen while creating, null = none
     gBusy: false,      // an Add with AI suggestion is in flight
     citeSel: 0,        // highlighted row in the autocomplete / picker
     citeQuery: '',     // the current [[ query being typed
@@ -538,6 +539,9 @@
     gallery: $('gallery'), gNew: $('g-new'), gCount: $('g-count'), gHint: $('g-hint'), gGrid: $('g-grid'),
     gDetail: $('g-detail'), gBack: $('g-back'), gTitle: $('g-title'), gDelete: $('g-delete'),
     gContent: $('g-content'), gTags: $('g-tags'), gTagInput: $('g-tag-input'),
+    gProgressEdit: $('g-progress-edit'), gProgressTrack: $('g-progress-track'),
+    gProgressFill: $('g-progress-fill'), gProgressInput: $('g-progress-input'),
+    gProgressClear: $('g-progress-clear'),
     gColors: $('g-colors'), gMoveLeft: $('g-move-left'), gMoveRight: $('g-move-right'),
     gAdd: $('g-add'), gLive: $('g-live'),
     citeSuggest: $('cite-suggest'), citeModal: $('cite-modal'),
@@ -1113,6 +1117,15 @@
       ? { month: 'short', day: 'numeric' }
       : { year: 'numeric', month: 'short', day: 'numeric' };
     return d.toLocaleDateString(undefined, opts);
+  }
+
+  // A progress number input's value: null when empty (no progress tracked),
+  // otherwise clamped to a whole 0-100 percent.
+  function readProgressInput(input) {
+    const t = input.value.trim();
+    if (!t) return null;
+    const n = Number(t);
+    return Number.isFinite(n) ? Math.max(0, Math.min(100, Math.round(n))) : null;
   }
 
   function renderList() {
@@ -2556,6 +2569,32 @@
     return item.end ? `${item.start}–${item.end}` : item.start;
   }
 
+  /** The item progress bar: a draggable track plus a % label that opens a
+      number input for exact values. Rendered only when progress != null. */
+  function tlProgressEl(item) {
+    const wrap = el('div', 'tl-progress');
+    wrap.dataset.id = item.id;
+    const track = el('div', 'tl-progress-track');
+    track.setAttribute('role', 'slider');
+    track.setAttribute('aria-label', 'Item progress');
+    track.setAttribute('aria-valuemin', '0');
+    track.setAttribute('aria-valuemax', '100');
+    track.setAttribute('aria-valuenow', String(item.progress));
+    track.setAttribute('aria-valuetext', `${item.progress}%`);
+    track.tabIndex = 0;
+    track.title = 'Drag or use arrow keys to adjust';
+    const fill = el('div', 'tl-progress-fill');
+    fill.style.width = item.progress + '%';
+    track.append(fill);
+    const pct = el('button', 'tl-progress-pct', item.progress + '%');
+    pct.type = 'button';
+    pct.dataset.id = item.id;
+    pct.title = 'Set an exact percentage';
+    pct.setAttribute('aria-label', 'Set exact progress percentage');
+    wrap.append(track, pct);
+    return wrap;
+  }
+
   function tlItemRow(item) {
     const row = el('article', 'tl-item' + (item.done ? ' done' : ''));
     row.dataset.id = item.id;
@@ -2570,6 +2609,7 @@
     const itemText = el('div', 'tl-item-text');
     itemText.innerHTML = NotesLinks.citeify(item.text, (t) => NotesLinks.resolveCitation(state.linkIndex, state.notes, t));
     body.append(itemText);
+    if (item.progress != null) body.append(tlProgressEl(item));
     const metaBits = [tlTimeLabel(item), fmtRel(item.updatedAt || item.createdAt)].filter(Boolean);
     body.append(el('div', 'tl-item-time', metaBits.join(' · ')));
     const actions = el('div', 'tl-item-actions');
@@ -2597,6 +2637,86 @@
     scheduleSave();
   }
 
+  /* ---------- item progress bars ---------- */
+
+  // Percent (0-100 int) for a pointer event over a track, or null.
+  function progressFromPointer(track, e) {
+    const r = track.getBoundingClientRect();
+    if (r.width <= 0) return null;
+    return Math.max(0, Math.min(100, Math.round(((e.clientX - r.left) / r.width) * 100)));
+  }
+
+  let tlProgressDrag = null; // { id, track, set, value, from } while dragging
+  ui.tlScroller.addEventListener('pointerdown', (e) => {
+    const track = e.target.closest('.tl-progress-track');
+    if (!track) return;
+    const wrap = track.closest('.tl-progress');
+    const item = tlItems().find((i) => i.id === wrap.dataset.id);
+    if (!item || item.progress == null) return;
+    e.preventDefault(); // keeps the row's HTML5 reorder drag out of the way
+    const fill = track.querySelector('.tl-progress-fill');
+    const pct = wrap.querySelector('.tl-progress-pct');
+    const set = (v) => {
+      fill.style.width = v + '%';
+      pct.textContent = v + '%';
+      track.setAttribute('aria-valuenow', String(v));
+      track.setAttribute('aria-valuetext', `${v}%`);
+    };
+    let value = progressFromPointer(track, e);
+    if (value != null) set(value); // press-to-set: a plain click jumps there
+    tlProgressDrag = { id: item.id, track, set, value, from: item.progress };
+    try { track.setPointerCapture(e.pointerId); } catch { /* detached mid-press */ }
+  });
+  ui.tlScroller.addEventListener('pointermove', (e) => {
+    if (!tlProgressDrag) return;
+    const v = progressFromPointer(tlProgressDrag.track, e);
+    if (v != null) { tlProgressDrag.value = v; tlProgressDrag.set(v); }
+  });
+  const tlProgressRelease = (cancel) => () => {
+    if (!tlProgressDrag) return;
+    const d = tlProgressDrag;
+    tlProgressDrag = null;
+    if (cancel) { renderTimeline({ keepScroll: true }); return; }
+    if (d.value != null && d.value !== d.from) {
+      tlMutate((items) => NotesTimeline.setProgress(items, d.id, d.value));
+    }
+  };
+  ui.tlScroller.addEventListener('pointerup', tlProgressRelease(false));
+  ui.tlScroller.addEventListener('pointercancel', tlProgressRelease(true));
+
+  // The % label becomes a number input; Enter/blur commits, Escape cancels.
+  function tlEditProgress(wrap, item) {
+    const pct = wrap.querySelector('.tl-progress-pct');
+    if (!pct) return;
+    const input = el('input', 'tl-progress-input');
+    input.type = 'number';
+    input.min = '0';
+    input.max = '100';
+    input.step = '1';
+    input.value = item.progress;
+    input.setAttribute('aria-label', 'Progress percentage');
+    pct.replaceWith(input);
+    input.focus();
+    input.select();
+    let closed = false;
+    const commit = () => {
+      if (closed) return;
+      closed = true;
+      const v = readProgressInput(input);
+      tlMutate((items) => NotesTimeline.setProgress(items, item.id, v));
+    };
+    const cancel = () => {
+      if (closed) return;
+      closed = true;
+      renderTimeline({ keepScroll: true });
+    };
+    input.addEventListener('blur', commit);
+    input.addEventListener('keydown', (evt) => {
+      if (evt.key === 'Enter') { evt.preventDefault(); commit(); }
+      if (evt.key === 'Escape') { evt.stopPropagation(); cancel(); }
+    });
+  }
+
   function beginEditItem(article, item) {
     article.textContent = '';
     article.classList.add('editing');
@@ -2614,6 +2734,18 @@
     end.setAttribute('aria-label', 'End time');
     times.append(start, el('span', 'tl-time-sep', '–'), end);
     const presets = tlPresetRow(start, end);
+    // optional progress: empty means "no bar on this item"
+    const prog = el('div', 'tl-edit-progress');
+    prog.append(el('span', 'tl-edit-progress-label', 'Progress'));
+    const progInput = el('input', 'tl-edit-progress-input');
+    progInput.type = 'number';
+    progInput.min = '0';
+    progInput.max = '100';
+    progInput.step = '1';
+    progInput.placeholder = 'none';
+    progInput.value = item.progress != null ? item.progress : '';
+    progInput.setAttribute('aria-label', 'Progress percentage');
+    prog.append(progInput, el('span', 'tl-edit-progress-unit', '%'));
     const row = el('div', 'tl-edit-actions');
     const save = el('button', 'btn sm primary', 'Save');
     save.type = 'button';
@@ -2625,11 +2757,13 @@
       const s = start.value || null;
       const e2 = end.value || null;
       const timesChanged = (item.start || null) !== s || (item.end || null) !== e2;
+      const p = readProgressInput(progInput);
       tlMutate((items) => {
         let next = NotesTimeline.updateItemText(items, item.id, v);
         // Re-slot by time only when the times changed, so a manual drag
         // order survives plain text edits.
         if (timesChanged) next = NotesTimeline.updateItemTime(next, item.id, s, e2);
+        if (p !== item.progress) next = NotesTimeline.setProgress(next, item.id, p);
         return next;
       });
     });
@@ -2639,7 +2773,7 @@
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); save.click(); }
     });
     row.append(save, cancel);
-    article.append(ta, times, presets, row);
+    article.append(ta, times, presets, prog, row);
     ta.focus();
   }
 
@@ -2687,6 +2821,13 @@
       openWikilink(tlLink.dataset.wikilink || '');
       return;
     }
+    const pctBtn = e.target.closest('.tl-progress-pct');
+    if (pctBtn) {
+      const wrap = pctBtn.closest('.tl-progress');
+      const item = tlItems().find((i) => i.id === wrap.dataset.id);
+      if (item && item.progress != null) tlEditProgress(wrap, item);
+      return;
+    }
     const act = e.target.closest('.tl-act');
     if (act) {
       const article = act.closest('.tl-item');
@@ -2728,6 +2869,23 @@
         const en = (page.querySelector('[data-role="tl-add-end"]') || {}).value || null;
         tlMutate((items) => NotesTimeline.insertItem(
           items, NotesTimeline.makeItem(ta.dataset.date, ta.value, undefined, s, en)));
+      }
+      return;
+    }
+    const track = e.target.closest('.tl-progress-track');
+    if (track) {
+      // the progress track is a keyboard slider: ±5 per arrow, Home/End bounds
+      const wrap = track.closest('.tl-progress');
+      const item = tlItems().find((i) => i.id === wrap.dataset.id);
+      if (!item) return;
+      let v = null;
+      if (e.key === 'ArrowLeft') v = Math.max(0, (item.progress || 0) - 5);
+      else if (e.key === 'ArrowRight') v = Math.min(100, (item.progress || 0) + 5);
+      else if (e.key === 'Home') v = 0;
+      else if (e.key === 'End') v = 100;
+      if (v != null) {
+        e.preventDefault();
+        tlMutate((items2) => NotesTimeline.setProgress(items2, item.id, v));
       }
       return;
     }
@@ -2996,6 +3154,18 @@
     card.setAttribute('aria-label', `${c.title || 'Untitled card'}`);
     card.append(el('div', 'g-card-title', c.title || 'Untitled card'));
     card.append(el('div', 'g-card-preview', NotesGallery.previewText(c.content)));
+    if (c.progress != null) {
+      // the card's own palette colour drives the bar (track + fill + %)
+      const bar = el('div', 'g-progress');
+      bar.dataset.id = c.id;
+      const track = el('div', 'g-progress-track');
+      track.setAttribute('aria-hidden', 'true'); // pointer-only on the grid; the detail view has the full control
+      const fill = el('div', 'g-progress-fill');
+      fill.style.width = c.progress + '%';
+      track.append(fill);
+      bar.append(track, el('span', 'g-progress-pct', c.progress + '%'));
+      card.append(bar);
+    }
     if (c.tags.length) {
       const tags = el('div', 'g-card-tags');
       for (const t of c.tags.slice(0, 3)) tags.append(el('span', 'g-chip', t));
@@ -3069,8 +3239,111 @@
     ui.gAdd.textContent = creating ? 'Add' : 'Done';
     renderGalleryTags(card ? card.tags : state.gDraftTags);
     renderGalleryColors(card ? card.color : NotesGallery.PALETTE[Math.floor(Math.random() * 12)]);
+    renderGalleryProgress(card);
     if (creating) ui.gContent.focus();
   }
+
+  /* The detail progress editor: the card's palette colour drives the bar;
+     the number input takes exact values (empty = no bar), the × clears. */
+  function renderGalleryProgress(card) {
+    const prog = card ? card.progress : state.gDraftProgress;
+    const colorKey = card ? card.color : (ui.gColors.dataset.pending || 'slate');
+    ui.gProgressEdit.dataset.color = colorKey;
+    ui.gProgressFill.style.width = (prog != null ? prog : 0) + '%';
+    ui.gProgressTrack.setAttribute('aria-valuenow', String(prog != null ? prog : 0));
+    ui.gProgressTrack.setAttribute('aria-valuetext', `${prog != null ? prog : 0}%`);
+    ui.gProgressTrack.title = 'Drag or use arrow keys to adjust';
+    ui.gProgressInput.value = prog != null ? prog : '';
+    ui.gProgressClear.classList.toggle('hidden', prog == null);
+  }
+
+  // Where a detail progress edit lands: the open card, or the draft while creating.
+  function gApplyProgress(v) {
+    const card = gFind(state.gDetailId);
+    if (card) {
+      if (v !== card.progress) gMutate((items) => NotesGallery.setProgress(items, card.id, v));
+    } else {
+      state.gDraftProgress = v;
+      renderGalleryProgress(null);
+    }
+  }
+
+  ui.gProgressInput.addEventListener('input', () => {
+    // live typing: empty clears, out-of-range clamps on commit (change/Enter)
+    const card = gFind(state.gDetailId);
+    const raw = ui.gProgressInput.value.trim();
+    if (!raw) { gApplyProgress(null); return; }
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return;
+    const v = Math.max(0, Math.min(100, Math.round(n)));
+    if (card) {
+      if (v !== card.progress) gMutate((items) => NotesGallery.setProgress(items, card.id, v));
+    } else {
+      state.gDraftProgress = v;
+      renderGalleryProgress(null);
+    }
+  });
+  ui.gProgressInput.addEventListener('change', () => {
+    // re-format what was typed (clamped) without firing another input loop
+    const v = readProgressInput(ui.gProgressInput);
+    ui.gProgressInput.value = v != null ? v : '';
+  });
+  ui.gProgressInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      ui.gProgressInput.blur();
+    }
+  });
+  ui.gProgressClear.innerHTML = ICONS.x(13);
+  ui.gProgressClear.addEventListener('click', () => gApplyProgress(null));
+
+  // detail track: pointer drag + keyboard slider
+  let gDetailProgressDrag = null;
+  const gDetailSetProgress = (v) => {
+    ui.gProgressFill.style.width = v + '%';
+    ui.gProgressInput.value = v;
+    ui.gProgressTrack.setAttribute('aria-valuenow', String(v));
+    ui.gProgressTrack.setAttribute('aria-valuetext', `${v}%`);
+  };
+  const gDetailCurrentProgress = () => {
+    const card = gFind(state.gDetailId);
+    const p = card ? card.progress : state.gDraftProgress;
+    return p != null ? p : 0;
+  };
+  ui.gProgressTrack.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    let value = progressFromPointer(ui.gProgressTrack, e);
+    if (value != null) gDetailSetProgress(value);
+    gDetailProgressDrag = { value, from: gDetailCurrentProgress() };
+    try { ui.gProgressTrack.setPointerCapture(e.pointerId); } catch { /* detached mid-press */ }
+  });
+  ui.gProgressTrack.addEventListener('pointermove', (e) => {
+    if (!gDetailProgressDrag) return;
+    const v = progressFromPointer(ui.gProgressTrack, e);
+    if (v != null) { gDetailProgressDrag.value = v; gDetailSetProgress(v); }
+  });
+  const gDetailProgressRelease = (cancel) => () => {
+    if (!gDetailProgressDrag) return;
+    const d = gDetailProgressDrag;
+    gDetailProgressDrag = null;
+    if (cancel) { renderGalleryProgress(gFind(state.gDetailId)); return; }
+    if (d.value != null && d.value !== d.from) gApplyProgress(d.value);
+  };
+  ui.gProgressTrack.addEventListener('pointerup', gDetailProgressRelease(false));
+  ui.gProgressTrack.addEventListener('pointercancel', gDetailProgressRelease(true));
+  ui.gProgressTrack.addEventListener('keydown', (e) => {
+    const cur = gDetailCurrentProgress();
+    let v = null;
+    if (e.key === 'ArrowLeft') v = Math.max(0, cur - 5);
+    else if (e.key === 'ArrowRight') v = Math.min(100, cur + 5);
+    else if (e.key === 'Home') v = 0;
+    else if (e.key === 'End') v = 100;
+    if (v != null) {
+      e.preventDefault();
+      gDetailSetProgress(v);
+      gApplyProgress(v);
+    }
+  });
 
   function renderGalleryTags(tags) {
     ui.gTags.innerHTML = '';
@@ -3109,7 +3382,10 @@
         const card = gFind(state.gDetailId);
         renderGalleryColors(key);
         if (card) gMutate((items) => NotesGallery.updateCard(items, card.id, { color: key }));
-        else ui.gColors.dataset.pending = key;
+        else {
+          ui.gColors.dataset.pending = key;
+          ui.gProgressEdit.dataset.color = key; // the draft bar follows the pick
+        }
       });
       ui.gColors.append(sw);
     }
@@ -3174,6 +3450,7 @@
   ui.gNew.addEventListener('click', () => {
     state.gDetailId = 'new';
     state.gDraftTags = [];
+    state.gDraftProgress = null;
     renderGallery();
   });
 
@@ -3218,9 +3495,10 @@
     }
     if (!title) title = NotesGallery.fallbackTitle(content);
     const pendingColor = ui.gColors.dataset.pending || NotesGallery.PALETTE[Math.floor(Math.random() * 12)];
-    const card = NotesGallery.newCard({ title, content, tags, color: pendingColor });
+    const card = NotesGallery.newCard({ title, content, tags, color: pendingColor, progress: state.gDraftProgress });
     delete ui.gColors.dataset.pending;
     state.gDraftTags = [];
+    state.gDraftProgress = null;
     gMutate((items) => [...items, card]);
     state.gDetailId = null;
     renderGallery();
@@ -3317,6 +3595,49 @@
     gAnnounce(`Moved “${(card && card.title) || 'card'}” to position ${toIndex + 1} of ${note.gallery.items.length}`);
     gDragId = null;
   });
+
+  /* Grid progress bars: press/drag the track to set the percent. The card
+     is a <button>, so the bar is pointer-driven only (exact numbers live in
+     the detail view) and swallows clicks so adjusting never opens the card. */
+  ui.gGrid.addEventListener('click', (e) => {
+    if (e.target.closest('.g-progress')) { e.stopPropagation(); e.preventDefault(); }
+  }, true);
+  let gProgressDrag = null; // { id, fill, pct, value, from } while dragging
+  ui.gGrid.addEventListener('pointerdown', (e) => {
+    const track = e.target.closest('.g-progress-track');
+    if (!track) return;
+    const bar = track.closest('.g-progress');
+    const c = gFind(bar.dataset.id);
+    if (!c) return;
+    e.preventDefault();
+    const fill = track.querySelector('.g-progress-fill');
+    const pct = bar.querySelector('.g-progress-pct');
+    const set = (v) => {
+      fill.style.width = v + '%';
+      pct.textContent = v + '%';
+    };
+    let value = progressFromPointer(track, e);
+    if (value != null) set(value);
+    gProgressDrag = { id: c.id, track, set, value, from: c.progress };
+    try { track.setPointerCapture(e.pointerId); } catch { /* detached mid-press */ }
+  });
+  ui.gGrid.addEventListener('pointermove', (e) => {
+    if (!gProgressDrag) return;
+    const v = progressFromPointer(gProgressDrag.track, e);
+    if (v != null) { gProgressDrag.value = v; gProgressDrag.set(v); }
+  });
+  const gProgressRelease = (cancel) => () => {
+    if (!gProgressDrag) return;
+    const d = gProgressDrag;
+    gProgressDrag = null;
+    if (cancel) { renderGallery(); return; }
+    if (d.value != null && d.value !== d.from) {
+      gMutate((items) => NotesGallery.setProgress(items, d.id, d.value));
+      gAnnounce(`Progress set to ${d.value}%`);
+    }
+  };
+  ui.gGrid.addEventListener('pointerup', gProgressRelease(false));
+  ui.gGrid.addEventListener('pointercancel', gProgressRelease(true));
 
   /* Interactive task checkboxes: clicking one flips the matching
      "- [ ]"/"- [x]" marker in the markdown source. Lines inside fenced

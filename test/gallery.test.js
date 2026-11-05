@@ -149,3 +149,32 @@ test('isPaletteKey', () => {
   assert.equal(G.isPaletteKey('Teal'), false); // keys are lowercase
   assert.equal(G.isPaletteKey(undefined), false);
 });
+
+/* ------------------------------------------------------ progress */
+
+test('parity: clampProgress agrees with the server copy', () => {
+  for (const v of [0, 1, 50, 100, -1, 101, 40.5, '40', null, undefined, NaN, Infinity]) {
+    assert.strictEqual(G.clampProgress(v), serverGallery.clampProgress(v), `clampProgress(${v}) disagrees`);
+  }
+});
+
+test('setProgress: clamped, immutable, clears with null; 0 stays tracked', () => {
+  const a = G.newCard({ title: 'a', id: 'a' });
+  const b = G.newCard({ title: 'b', id: 'b' });
+  let items = G.setProgress([a, b], 'a', 45);
+  assert.equal(items[0].progress, 45);
+  assert.equal(a.progress, null);        // original untouched
+  assert.equal(items[1].progress, null); // sibling untouched
+  assert.ok(items[0].updatedAt >= a.updatedAt);
+  items = G.setProgress(items, 'a', 250);
+  assert.equal(items[0].progress, null); // out of range clears
+  items = G.setProgress(items, 'a', 0);
+  assert.equal(items[0].progress, 0);    // 0 is a valid tracked value
+});
+
+test('newCard keeps a valid progress and drops junk', () => {
+  assert.equal(G.newCard({ content: 'x', progress: 30 }).progress, 30);
+  assert.equal(G.newCard({ content: 'x', progress: 101 }).progress, null);
+  assert.equal(G.newCard({ content: 'x', progress: 'half' }).progress, null);
+  assert.equal(G.newCard({ content: 'x' }).progress, null);
+});

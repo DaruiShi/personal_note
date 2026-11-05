@@ -265,3 +265,60 @@ test('summarize: totals and range', () => {
   assert.deepEqual(s, { total: 3, dates: 2, first: '2026-10-28', last: '2026-10-30' });
   assert.deepEqual(T.summarize([]), { total: 0, dates: 0, first: null, last: null });
 });
+
+/* ------------------------------------------------------ progress */
+
+const serverTimeline = require('../lib/timeline');
+
+test('parity: clampProgress agrees with the server copy', () => {
+  for (const v of [0, 1, 50, 100, -1, 101, 40.5, '40', null, undefined, NaN, Infinity]) {
+    assert.strictEqual(T.clampProgress(v), serverTimeline.clampProgress(v), `clampProgress(${v}) disagrees`);
+  }
+});
+
+test('setProgress: 100 marks done, below 100 reopens, null keeps done', () => {
+  const a = it('2026-10-30', 'one', 1);
+  let items = T.setProgress([a], a.id, 40);
+  assert.equal(items[0].progress, 40);
+  assert.equal(items[0].done, false);
+  items = T.setProgress(items, a.id, 100);
+  assert.equal(items[0].progress, 100);
+  assert.equal(items[0].done, true);
+  // dragging back below 100 reopens the item
+  items = T.setProgress(items, a.id, 60);
+  assert.equal(items[0].progress, 60);
+  assert.equal(items[0].done, false);
+  // clearing keeps the current done state; junk values clamp to null
+  items = T.setProgress(items, a.id, null);
+  assert.equal(items[0].progress, null);
+  assert.equal(items[0].done, false);
+  items = T.setProgress(items, a.id, 999);
+  assert.equal(items[0].progress, null);
+  // the original array is untouched
+  assert.equal(a.progress, undefined);
+  assert.equal(a.done, undefined);
+});
+
+test('toggleDone couples with progress: fills to 100, drops a full bar', () => {
+  const half = { ...it('2026-10-30', 'half', 1), progress: 40 };
+  let items = T.toggleDone([half], half.id);
+  assert.equal(items[0].done, true);
+  assert.equal(items[0].progress, 100); // checking done fills the bar
+  items = T.toggleDone(items, half.id);
+  assert.equal(items[0].done, false);
+  assert.equal(items[0].progress, null); // reopening drops the full bar
+  // items without progress never gain one
+  const plain = it('2026-10-30', 'plain', 2);
+  items = T.toggleDone([plain], plain.id);
+  assert.equal(items[0].done, true);
+  assert.equal(items[0].progress, null);
+  // partial progress below 100 survives a reopen
+  const quarter = { ...it('2026-10-30', 'q', 3), progress: 25, done: true };
+  items = T.toggleDone([quarter], quarter.id);
+  assert.equal(items[0].done, false);
+  assert.equal(items[0].progress, 25);
+});
+
+test('makeItem starts with no progress', () => {
+  assert.equal(T.makeItem('2026-10-30', 'x').progress, null);
+});

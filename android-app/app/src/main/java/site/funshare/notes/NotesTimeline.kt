@@ -105,6 +105,7 @@ object NotesTimeline {
         now: Long = System.currentTimeMillis(),
         start: String? = null,
         end: String? = null,
+        progress: Int? = null,
     ): TimelineItem = TimelineItem(
         id = "tmp:" + UUID.randomUUID().toString(),
         date = date,
@@ -112,9 +113,13 @@ object NotesTimeline {
         start = start?.takeIf { TIME_OK.matches(it) },
         end = end?.takeIf { TIME_OK.matches(it) },
         done = false,
+        progress = clampProgress(progress),
         createdAt = now,
         updatedAt = now,
     )
+
+    /** Optional 0-100 whole percent, else null — same rule as the server. */
+    fun clampProgress(v: Int?): Int? = v?.takeIf { it in 0..100 }
 
     /**
      * Insert a new item at its policy position — timed items slot among
@@ -192,8 +197,44 @@ object NotesTimeline {
     fun remove(items: List<TimelineItem>, id: String): List<TimelineItem> =
         items.filterNot { it.id == id }
 
+    /**
+     * Flip one item's done flag. Done and progress stay a single state:
+     * checking done fills a tracked progress to 100, unchecking drops a
+     * full bar (the item is reopened). Untracked items just flip.
+     */
     fun toggleDone(items: List<TimelineItem>, id: String, now: Long = System.currentTimeMillis()): List<TimelineItem> =
-        items.map { if (it.id == id) it.copy(done = !it.done, updatedAt = now) else it }
+        items.map {
+            if (it.id != id) it
+            else {
+                val done = !it.done
+                val progress = when {
+                    done && it.progress != null -> 100
+                    !done && it.progress == 100 -> null
+                    else -> it.progress
+                }
+                it.copy(done = done, progress = progress, updatedAt = now)
+            }
+        }
+
+    /**
+     * Set one item's progress (null removes the bar). 100% marks the item
+     * done; any value below 100 reopens it. Clearing (null) leaves done
+     * as it is — the same contract as the web client's setProgress.
+     */
+    fun setProgress(items: List<TimelineItem>, id: String, progress: Int?, now: Long = System.currentTimeMillis()): List<TimelineItem> {
+        val p = clampProgress(progress)
+        return items.map {
+            if (it.id != id) it
+            else {
+                val done = when (p) {
+                    100 -> true
+                    null -> it.done
+                    else -> false
+                }
+                it.copy(progress = p, done = done, updatedAt = now)
+            }
+        }
+    }
 
     /**
      * Append parsed items, skipping an incoming item when an existing one

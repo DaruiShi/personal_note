@@ -100,6 +100,7 @@ object NotesGallery {
         color: String? = null,
         now: Long = System.currentTimeMillis(),
         id: String? = null,
+        progress: Int? = null,
     ): GalleryCard {
         tmpSeq += 1
         return GalleryCard(
@@ -108,10 +109,20 @@ object NotesGallery {
             content = content.trim(),
             tags = normalizeTags(tags),
             color = if (isPaletteKey(color)) color!! else PALETTE[tmpSeq % PALETTE.size],
+            progress = clampProgress(progress),
             createdAt = now,
             updatedAt = now,
         )
     }
+
+    /** Optional 0-100 whole percent, else null — same rule as the server. */
+    fun clampProgress(v: Int?): Int? = v?.takeIf { it in 0..100 }
+
+    /** Set one card's progress (null removes the bar); returns a new list. */
+    fun setProgress(items: List<GalleryCard>, id: String, progress: Int?, now: Long = System.currentTimeMillis()): List<GalleryCard> =
+        items.map {
+            if (it.id != id) it else it.copy(progress = clampProgress(progress), updatedAt = now)
+        }
 
     /** Patch one card (bumping updatedAt); returns a new list. */
     fun updateCard(items: List<GalleryCard>, id: String, patch: Map<String, Any?>, now: Long = System.currentTimeMillis()): List<GalleryCard> =
@@ -122,6 +133,7 @@ object NotesGallery {
                 content = (patch["content"] as? String)?.trim() ?: it.content,
                 tags = (patch["tags"] as? List<String>)?.let { t -> normalizeTags(t) } ?: it.tags,
                 color = (patch["color"] as? String)?.takeIf { c -> isPaletteKey(c) } ?: it.color,
+                progress = if (patch.containsKey("progress")) clampProgress(patch["progress"] as? Int) else it.progress,
                 updatedAt = now,
             )
         }

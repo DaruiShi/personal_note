@@ -92,16 +92,27 @@
   let tmpSeq = 0;
 
   /** New card with a temporary id (the server assigns a UUID on save). */
-  function newCard({ title = '', content = '', tags = [], color, now = Date.now(), id } = {}) {
+  function newCard({ title = '', content = '', tags = [], color, progress = null, now = Date.now(), id } = {}) {
     return {
       id: id || 'g:' + (++tmpSeq).toString(36) + Math.random().toString(36).slice(2, 8),
       title: String(title || '').trim(),
       content: String(content || '').trim(),
       tags: normalizeTags(tags),
       color: isPaletteKey(color) ? color : PALETTE[Math.floor(Math.random() * PALETTE.length)],
+      progress: clampProgress(progress),
       createdAt: now,
       updatedAt: now,
     };
+  }
+
+  /** Optional 0-100 whole percent, else null — same rule as the server. */
+  function clampProgress(v) {
+    return (Number.isInteger(v) && v >= 0 && v <= 100) ? v : null;
+  }
+
+  /** Set one card's progress (null or 0-100; clamped); returns a new array. */
+  function setProgress(items, id, progress) {
+    return updateCard(items, id, { progress: clampProgress(progress) });
   }
 
   /** Patch one card (bumping updatedAt); returns a new array. */
@@ -163,6 +174,7 @@
 
   return {
     PALETTE, isPaletteKey, fallbackTitle, previewText, normalizeTags,
-    newCard, updateCard, removeCard, reorder, moveBy, applySuggestion, summary,
+    newCard, updateCard, setProgress, clampProgress, removeCard, reorder, moveBy,
+    applySuggestion, summary,
   };
 });

@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -28,6 +29,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -53,6 +55,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -138,7 +141,7 @@ fun GalleryEditor(vm: AppViewModel, modifier: Modifier = Modifier) {
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     items(cards, key = { it.id }) { card ->
-                        GalleryCardView(card = card, onClick = { openId = card.id })
+                        GalleryCardView(card = card, vm = vm, onClick = { openId = card.id })
                     }
                 }
             }
@@ -155,7 +158,7 @@ fun GalleryEditor(vm: AppViewModel, modifier: Modifier = Modifier) {
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun GalleryCardView(card: GalleryCard, onClick: () -> Unit) {
+private fun GalleryCardView(card: GalleryCard, vm: AppViewModel, onClick: () -> Unit) {
     val (bg, fg) = gPair(card.color)
     Surface(
         color = bg,
@@ -181,6 +184,18 @@ private fun GalleryCardView(card: GalleryCard, onClick: () -> Unit) {
                 maxLines = 4,
                 overflow = TextOverflow.Ellipsis,
             )
+            // the card's own palette colour drives the bar (web .g-progress)
+            if (card.progress != null) {
+                Spacer(Modifier.height(6.dp))
+                ProgressBarRow(
+                    progress = card.progress,
+                    onChange = { vm.gSetProgress(card.id, it) },
+                    modifier = Modifier.fillMaxWidth(),
+                    fill = fg,
+                    track = fg.copy(alpha = 0.14f),
+                    labelColor = fg.copy(alpha = 0.85f),
+                )
+            }
             if (card.tags.isNotEmpty()) {
                 Spacer(Modifier.height(6.dp))
                 Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
@@ -216,6 +231,7 @@ private fun GalleryCardDetail(
         mutableStateOf(card?.color ?: NotesGallery.PALETTE[0])
     }
     var tagInput by remember { mutableStateOf("") }
+    var progressText by remember(card?.id ?: "new") { mutableStateOf(card?.progress?.toString() ?: "") }
     var busy by remember { mutableStateOf(false) }
     var deleteConfirm by remember { mutableStateOf(false) }
 
@@ -302,6 +318,63 @@ private fun GalleryCardDetail(
             }),
         )
 
+        /* progress — the card's palette colour drives the fill (web .g-progress-edit) */
+        Text(
+            "Progress",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 14.dp, bottom = 6.dp),
+        )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            val shown = parseProgressInput(progressText)
+            ProgressBarTrack(
+                progress = shown ?: 0,
+                onChange = {
+                    progressText = it.toString()
+                    pushIfEditing("progress", it)
+                },
+                modifier = Modifier.weight(1f),
+                fill = gPair(color).second,
+                height = 8.dp,
+                bordered = true,
+                label = "Progress bar",
+            )
+            OutlinedTextField(
+                value = progressText,
+                onValueChange = {
+                    progressText = it.filter(Char::isDigit).take(3)
+                    pushIfEditing("progress", parseProgressInput(progressText))
+                },
+                placeholder = {
+                    Text("—", style = MaterialTheme.typography.labelMedium)
+                },
+                modifier = Modifier.width(88.dp),
+                singleLine = true,
+                textStyle = MaterialTheme.typography.labelMedium,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            )
+            Text(
+                "%",
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (shown != null) {
+                IconButton(onClick = {
+                    progressText = ""
+                    pushIfEditing("progress", null)
+                }) {
+                    Icon(
+                        Icons.Filled.Close,
+                        contentDescription = "Clear progress",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+
         /* colour swatches */
         Text(
             "Colour",
@@ -374,6 +447,7 @@ private fun GalleryCardDetail(
                                 content = content,
                                 tags = finalTags,
                                 color = color,
+                                progress = parseProgressInput(progressText),
                             ),
                         )
                         busy = false

@@ -395,3 +395,42 @@ test('lib/gallery unit: normalizeGallery order, fallbackTitle, nextColor determi
   assert.equal(gl.fallbackTitle('Hi'), 'Hi');
   assert.equal(gl.fallbackTitle('x'.repeat(100)), Array.from('x'.repeat(100)).slice(0, 24).join('') + '…');
 });
+
+test('progress: validated on cards, mirrored as a Progress: NN% line', async () => {
+  const server = await startServer();
+  try {
+    const cookie = await register(server.base, 'gprog');
+    const { data: { note } } = await req(server.base, cookie, 'POST', '/api/notes', {
+      title: 'g', kind: 'gallery',
+      gallery: { items: [
+        card('Tracked', { progress: 60, tags: ['x'] }),
+        card('Bad value', { progress: 'lots' }),
+        card('None'),
+      ] },
+      tags: [], pinned: false,
+    });
+    const items = note.gallery.items;
+    assert.equal(items[0].progress, 60);
+    assert.equal(items[1].progress, null); // junk -> not tracked
+    assert.equal(items[2].progress, null);
+    assert.equal(note.content, [
+      '## Tracked\n\nTracked\n\nProgress: 60%\n\nTags: x',
+      '## Bad value\n\nBad value',
+      '## None\n\nNone',
+    ].join('\n\n---\n\n'));
+  } finally {
+    await server.stop();
+  }
+});
+
+test('lib/gallery unit: clampProgress accepts whole 0-100 only', () => {
+  assert.equal(gl.clampProgress(0), 0);
+  assert.equal(gl.clampProgress(100), 100);
+  assert.equal(gl.clampProgress(7), 7);
+  assert.equal(gl.clampProgress(-3), null);
+  assert.equal(gl.clampProgress(101), null);
+  assert.equal(gl.clampProgress(33.3), null);
+  assert.equal(gl.clampProgress(true), null);
+  assert.equal(gl.clampProgress(null), null);
+  assert.equal(gl.clampProgress(undefined), null);
+});
