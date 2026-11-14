@@ -103,7 +103,7 @@ const BODY_LIMIT = 2 * 1024 * 1024;             // 2 MB
 const UPLOAD_LIMIT = 25 * 1024 * 1024;          // 25 MB per uploaded file
 const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
 const HISTORY_DIR = path.join(DATA_DIR, 'history');
-const UPLOAD_EXT_RE = 'png|jpe?g|gif|webp|pdf|docx?|pptx?|xlsx?|txt|csv|zip|odt|odp|ods';
+const UPLOAD_EXT_RE = 'png|jpe?g|gif|webp|pdf|docx?|pptx?|xlsx?|txt|csv|zip|odt|odp|ods|markdown|md';
 const UPLOAD_NAME_RE = new RegExp(`^[a-f0-9]{32}\\.(${UPLOAD_EXT_RE})$`);
 const SHARE_TOKEN_RE = /^[a-f0-9]{32}$/;
 const MAX_NOTES_PER_USER = 5000;
@@ -416,7 +416,7 @@ function removeUser(user) {
 const IMAGE_EXTS = ['png', 'jpg', 'gif', 'webp'];
 const ZIP_DOC_EXTS = ['docx', 'pptx', 'xlsx', 'odt', 'odp', 'ods'];
 const OLE_DOC_EXTS = ['doc', 'ppt', 'xls'];
-const TEXT_DOC_EXTS = ['txt', 'csv', 'md'];
+const TEXT_DOC_EXTS = ['txt', 'csv', 'md', 'markdown'];
 
 // Identify a file by magic bytes — never trust the client's file name or
 // content type. Returns the canonical extension, or null if unsupported.
